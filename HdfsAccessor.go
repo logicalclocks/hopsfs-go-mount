@@ -118,7 +118,7 @@ func (dfs *hdfsAccessorImpl) connectToNameNodeImpl() (*hdfs.Client, error) {
 		}
 	}
 
-	loginfo(fmt.Sprintf("Connecting as user: %s UID: %d", forceOverrideUsername, hadoopUserID), nil)
+	loginfo(fmt.Sprintf("Connecting as user: %s UID: %d", hadoopUserName, hadoopUserID), nil)
 
 	// Performing an attempt to connect to the name node
 	// Colinmar's hdfs implementation has supported the multiple name node connection
