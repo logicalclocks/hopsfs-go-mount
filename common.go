@@ -56,6 +56,8 @@ func ChownOp(attrs *Attrs, fileSystem *FileSystem, path string, uid uint32, gid 
 		pathGroupName, err := getGroupNameFromPath(path)
 		if err == nil {
 			groupName = pathGroupName
+		} else {
+			logwarn(err.Error(), Fields{Path: path})
 		}
 	} else {
 		groupName = ugcache.LookupGroupName(gid)
