@@ -104,7 +104,7 @@ func (dfs *hdfsAccessorImpl) connectToNameNodeImpl() (*hdfs.Client, error) {
 		// if it exists we can look it up, otherwise it will always be 0
 		hadoopUserID = ugcache.LookupUId(hadoopUserName)
 	} else {
-		hadoopUserName := os.Getenv("HADOOP_USER_NAME")
+		hadoopUserName = os.Getenv("HADOOP_USER_NAME")
 		if hadoopUserName == "" {
 			currentSystemUser, err := ugcache.CurrentUserName()
 			if err != nil {
@@ -114,7 +114,7 @@ func (dfs *hdfsAccessorImpl) connectToNameNodeImpl() (*hdfs.Client, error) {
 		}
 		hadoopUserID = ugcache.LookupUId(hadoopUserName)
 		if hadoopUserName != "root" && hadoopUserID == 0 {
-			logwarn(fmt.Sprintf("Unable to find user id for user: %s, returning uid: 0", forceOverrideUsername), nil)
+			logwarn(fmt.Sprintf("Unable to find user id for user: %s, returning uid: 0", hadoopUserName), nil)
 		}
 	}
 
