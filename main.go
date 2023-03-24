@@ -160,7 +160,7 @@ func parseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	flag.StringVar(&logFile, "logFile", "", "Log file path. By default the log is written to console")
 	flag.IntVar(&connectors, "numConnections", 1, "Number of connections with the namenode")
 	flag.StringVar(&forceOverrideUsername, "hopsFSUserName", "", " username")
-	useGroupFromHopsFsDatasetPath = flag.Bool("getGroupFromHopsFSDatasetPath", true, "Get the group from hopsfs dataset path. This will work if a hopsworks project is mounted")
+	useGroupFromHopsFsDatasetPath = flag.Bool("getGroupFromHopsFSDatasetPath", false, "Get the group from hopsfs dataset path. This will work if a hopsworks project is mounted")
 	allowOther = flag.Bool("allowOther", true, "Allow other users to use the filesystem")
 	version = flag.Bool("version", false, "Print version")
 
