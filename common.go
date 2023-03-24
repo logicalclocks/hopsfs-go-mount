@@ -56,8 +56,6 @@ func ChownOp(attrs *Attrs, fileSystem *FileSystem, path string, uid uint32, gid 
 		pathGroupName, err := getGroupNameFromPath(path)
 		if err == nil {
 			groupName = pathGroupName
-		} else {
-			logwarn(err.Error(), Fields{Path: path})
 		}
 	} else {
 		groupName = ugcache.LookupGroupName(gid)
@@ -112,7 +110,6 @@ func UpdateTS(attrs *Attrs, fileSystem *FileSystem, path string, req *fuse.Setat
 func getGroupNameFromPath(path string) (string, error) {
 	loginfo("Getting group name from path", Fields{Path: path})
 	result := hopfsProjectDatasetGroupRegex.FindAllStringSubmatch(path, -1)
-	//names := hopfsProjectDatasetGroupRegex.SubexpNames()
 	if len(result) == 0 {
 		return "", errors.New("could not get project name and dataset name from path " + path)
 	}

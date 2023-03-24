@@ -34,7 +34,7 @@ var tls *bool
 var connectors int
 var version *bool
 var forceOverrideUsername string
-var hopfsProjectDatasetGroupRegex = regexp.MustCompile(`/*Projects/(?P<projectName>\w+)/(?P<datasetName>\w+)/*`)
+var hopfsProjectDatasetGroupRegex = regexp.MustCompile(`/*Projects/(?P<projectName>\w+)/(?P<datasetName>\w+)/\/*`)
 var useGroupFromHopsFsDatasetPath *bool
 var allowOther *bool
 
