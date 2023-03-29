@@ -20,23 +20,23 @@ import (
 	_ "bazil.org/fuse/fs/fstestutil"
 )
 
-var stagingDir string
-var mntSrcDir string
-var logFile string
-var logLevel string
-var rootCABundle string
-var clientCertificate string
-var clientKey string
-var lazyMount *bool
-var allowedPrefixesString *string
-var readOnly *bool
-var tls *bool
+var stagingDir string = "/tmp"
+var mntSrcDir string = "/"
+var logFile string = ""
+var logLevel string = "info"
+var rootCABundle string = "/srv/hops/super_crypto/hdfs/hops_root_ca.pem"
+var clientCertificate string = "/srv/hops/super_crypto/hdfs/hdfs_certificate_bundle.pem"
+var clientKey string = "/srv/hops/super_crypto/hdfs/hdfs_priv.pem"
+var lazyMount bool = false
+var allowedPrefixesString string = "*"
+var readOnly bool = false
+var tls bool = false
 var connectors int
-var version *bool
-var forceOverrideUsername string
+var version bool = false
+var forceOverrideUsername string = ""
+var useGroupFromHopsFsDatasetPath bool = false
+var allowOther bool = false
 var hopfsProjectDatasetGroupRegex = regexp.MustCompile(`/*Projects/(?P<projectName>\w+)/(?P<datasetName>\w+)/\/*`)
-var useGroupFromHopsFsDatasetPath *bool
-var allowOther *bool
 
 func main() {
 
@@ -50,10 +50,10 @@ func main() {
 	mountPoint := flag.Arg(1)
 	createStagingDir()
 
-	allowedPrefixes := strings.Split(*allowedPrefixesString, ",")
+	allowedPrefixes := strings.Split(allowedPrefixesString, ",")
 
 	tlsConfig := TLSConfig{
-		TLS:               *tls,
+		TLS:               tls,
 		RootCABundle:      rootCABundle,
 		ClientCertificate: clientCertificate,
 		ClientKey:         clientKey,
@@ -79,17 +79,17 @@ func main() {
 
 	// Wrapping with FaultTolerantHdfsAccessor
 
-	if !*lazyMount && ftHdfsAccessors[0].EnsureConnected() != nil {
+	if !lazyMount && ftHdfsAccessors[0].EnsureConnected() != nil {
 		logfatal("Can't establish connection to HopsFS, mounting will NOT be performend (this can be suppressed with -lazy", nil)
 	}
 
 	// Creating the virtual file system
-	fileSystem, err := NewFileSystem(ftHdfsAccessors, mntSrcDir, allowedPrefixes, *readOnly, retryPolicy, WallClock{})
+	fileSystem, err := NewFileSystem(ftHdfsAccessors, mntSrcDir, allowedPrefixes, readOnly, retryPolicy, WallClock{})
 	if err != nil {
 		logfatal(fmt.Sprintf("Error/NewFileSystem: %v ", err), nil)
 	}
 
-	mountOptions := getMountOptions(*readOnly)
+	mountOptions := getMountOptions(readOnly)
 	c, err := fileSystem.Mount(mountPoint, mountOptions...)
 	if err != nil {
 		logfatal(fmt.Sprintf("Failed to mount FS. Error: %v", err), nil)
@@ -143,16 +143,16 @@ var Usage = func() {
 }
 
 func parseArgsAndInitLogger(retryPolicy *RetryPolicy) {
-	lazyMount = flag.Bool("lazy", false, "Allows to mount HopsFS filesystem before HopsFS is available")
+	lazyMount = *flag.Bool("lazy", false, "Allows to mount HopsFS filesystem before HopsFS is available")
 	flag.DurationVar(&retryPolicy.TimeLimit, "retryTimeLimit", 5*time.Minute, "time limit for all retry attempts for failed operations")
 	flag.IntVar(&retryPolicy.MaxAttempts, "retryMaxAttempts", 10, "Maxumum retry attempts for failed operations")
 	flag.DurationVar(&retryPolicy.MinDelay, "retryMinDelay", 1*time.Second, "minimum delay between retries (note, first retry always happens immediatelly)")
 	flag.DurationVar(&retryPolicy.MaxDelay, "retryMaxDelay", 60*time.Second, "maximum delay between retries")
-	allowedPrefixesString = flag.String("allowedPrefixes", "*", "Comma-separated list of allowed path prefixes on the remote file system, if specified the mount point will expose access to those prefixes only")
-	readOnly = flag.Bool("readOnly", false, "Enables mount with readonly")
-	flag.StringVar(&logLevel, "logLevel", "error", "logs to be printed. error, warn, info, debug, trace")
+	allowedPrefixesString = *flag.String("allowedPrefixes", "*", "Comma-separated list of allowed path prefixes on the remote file system, if specified the mount point will expose access to those prefixes only")
+	readOnly = *flag.Bool("readOnly", false, "Enables mount with readonly")
+	flag.StringVar(&logLevel, "logLevel", "info", "logs to be printed. error, warn, info, debug, trace")
 	flag.StringVar(&stagingDir, "stageDir", "/tmp", "stage directory for writing files")
-	tls = flag.Bool("tls", false, "Enables tls connections")
+	tls = *flag.Bool("tls", false, "Enables tls connections")
 	flag.StringVar(&rootCABundle, "rootCABundle", "/srv/hops/super_crypto/hdfs/hops_root_ca.pem", "Root CA bundle location ")
 	flag.StringVar(&clientCertificate, "clientCertificate", "/srv/hops/super_crypto/hdfs/hdfs_certificate_bundle.pem", "Client certificate location")
 	flag.StringVar(&clientKey, "clientKey", "/srv/hops/super_crypto/hdfs/hdfs_priv.pem", "Client key location")
@@ -160,14 +160,14 @@ func parseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	flag.StringVar(&logFile, "logFile", "", "Log file path. By default the log is written to console")
 	flag.IntVar(&connectors, "numConnections", 1, "Number of connections with the namenode")
 	flag.StringVar(&forceOverrideUsername, "hopsFSUserName", "", " username")
-	useGroupFromHopsFsDatasetPath = flag.Bool("getGroupFromHopsFSDatasetPath", false, "Get the group from hopsfs dataset path. This will work if a hopsworks project is mounted")
-	allowOther = flag.Bool("allowOther", true, "Allow other users to use the filesystem")
-	version = flag.Bool("version", false, "Print version")
+	useGroupFromHopsFsDatasetPath = *flag.Bool("getGroupFromHopsFSDatasetPath", false, "Get the group from hopsfs dataset path. This will work if a hopsworks project is mounted")
+	allowOther = *flag.Bool("allowOther", true, "Allow other users to use the filesystem")
+	version = *flag.Bool("version", false, "Print version")
 
 	flag.Usage = Usage
 	flag.Parse()
 
-	if *version {
+	if version {
 		fmt.Printf("Version: %s\n", VERSION)
 		fmt.Printf("Git commit: %s\n", GITCOMMIT)
 		fmt.Printf("Date: %s\n", BUILDTIME)
@@ -185,7 +185,7 @@ func parseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	}
 	initLogger(logLevel, false, logFile)
 
-	loginfo(fmt.Sprintf("Staging dir is:%s, Using TLS: %v, RetryAttempts: %d,  LogFile: %s", stagingDir, *tls, retryPolicy.MaxAttempts, logFile), nil)
+	loginfo(fmt.Sprintf("Staging dir is:%s, Using TLS: %v, RetryAttempts: %d,  LogFile: %s", stagingDir, tls, retryPolicy.MaxAttempts, logFile), nil)
 	loginfo(fmt.Sprintf("hopsfs-mount: current head GITCommit: %s Built time: %s Built by: %s ", GITCOMMIT, BUILDTIME, HOSTNAME), nil)
 }
 
@@ -223,7 +223,7 @@ func getMountOptions(ro bool) []fuse.MountOption {
 		fuse.DefaultPermissions(),
 	}
 
-	if *allowOther {
+	if allowOther {
 		mountOptions = append(mountOptions, fuse.AllowOther())
 	}
 

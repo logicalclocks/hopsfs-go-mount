@@ -52,7 +52,7 @@ func ChownOp(attrs *Attrs, fileSystem *FileSystem, path string, uid uint32, gid 
 		}
 	}
 
-	if *useGroupFromHopsFsDatasetPath {
+	if useGroupFromHopsFsDatasetPath {
 		pathGroupName, err := getGroupNameFromPath(path)
 		if err == nil {
 			groupName = pathGroupName

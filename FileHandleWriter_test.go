@@ -4,7 +4,6 @@
 package main
 
 import (
-	"flag"
 	"io"
 	"os"
 	"testing"
@@ -13,10 +12,6 @@ import (
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 )
-
-func init() {
-	flag.StringVar(&stagingDir, "stageDir", "/tmp", "set stage dir for test")
-}
 
 func TestReadWriteFile(t *testing.T) {
 	mockCtrl := gomock.NewController(t)

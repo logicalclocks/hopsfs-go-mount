@@ -417,16 +417,17 @@ func testSeeks(t *testing.T, client *hdfs.Client, diskTestFile string, dfsTestFi
 
 func withMount(t testing.TB, srcDir string, fn func(mntPath string, hdfsAccessor HdfsAccessor)) {
 	t.Helper()
+
+	// Wrapping with FaultTolerantHdfsAccessor
+	retryPolicy := NewDefaultRetryPolicy(WallClock{})
+	retryPolicy.MaxAttempts = 1 // for quick failure
 	initLogger("info", false, "")
-	hdfsAccessor, _ := NewHdfsAccessor("localhost:8020", WallClock{}, TLSConfig{TLS: false})
+	hdfsAccessor, _ := NewHdfsAccessor("localhost:8020", WallClock{}, TLSConfig{TLS: false, RootCABundle: rootCABundle, ClientCertificate: clientCertificate, ClientKey: clientKey})
 	err := hdfsAccessor.EnsureConnected()
 	if err != nil {
 		t.Fatalf(fmt.Sprintf("Error/NewHdfsAccessor: %v ", err), nil)
 	}
 
-	// Wrapping with FaultTolerantHdfsAccessor
-	retryPolicy := NewDefaultRetryPolicy(WallClock{})
-	retryPolicy.MaxAttempts = 1 // for quick failure
 	ftHdfsAccessor := NewFaultTolerantHdfsAccessor(hdfsAccessor, retryPolicy)
 
 	// Creating the virtual file system
