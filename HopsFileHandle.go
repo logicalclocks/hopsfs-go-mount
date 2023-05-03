@@ -77,7 +77,7 @@ func (fh *FileHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fus
 	if err != nil {
 		if err == io.EOF {
 			logdebug("Completed reading", fh.logInfo(Fields{Operation: Read, Error: err, Bytes: nr}))
-			if nr > 0 {
+			if nr >= 0 {
 				return nil
 			} else {
 				return err
