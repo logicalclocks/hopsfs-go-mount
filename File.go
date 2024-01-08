@@ -86,6 +86,8 @@ func (file *FileINode) Open(ctx context.Context, req *fuse.OpenRequest, resp *fu
 	if err != nil {
 		return nil, err
 	}
+	resp.Flags = fuse.OpenDirectIO
+	resp.Handle = fuse.HandleID(handle.fhID)
 
 	file.AddHandle(handle)
 	return handle, nil
@@ -278,7 +280,7 @@ func (file *FileINode) NewFileHandle(existsInDFS bool, flags fuse.OpenFlags) (*F
 	file.lockFileHandles()
 	defer file.unlockFileHandles()
 
-	fh := &FileHandle{File: file, fileFlags: flags, fhID: int64(rand.Uint64())}
+	fh := &FileHandle{File: file, fileFlags: flags, fhID: rand.Uint64()}
 	operation := Create
 	if existsInDFS {
 		operation = Open

@@ -19,7 +19,7 @@ type FileHandle struct {
 	fileFlags         fuse.OpenFlags // flags used to creat the file
 	tatalBytesRead    int64
 	totalBytesWritten int64
-	fhID              int64 // file handle id. for debugging only
+	fhID              uint64 // file handle id. for debugging only
 }
 
 // Verify that *FileHandle implements necesary FUSE interfaces

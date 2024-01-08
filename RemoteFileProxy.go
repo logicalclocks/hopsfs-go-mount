@@ -60,6 +60,7 @@ func (p *RemoteROFileProxy) ReadAt(b []byte, off int64) (int, error) {
 
 	if err != nil && err == io.EOF && n > 0 {
 		// no need to throw io.EOF
+		logdebug("RemoteFileProxy Finished reading", nil)
 		err = nil
 	}
 
