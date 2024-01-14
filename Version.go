@@ -5,7 +5,7 @@ package main
 var (
 	// Add Version tag, manually update
 	// Note: redeploy bin to repo.hops.works
-	VERSION = "3.2.0.11"
+	VERSION = "3.2.0.11.1"
 
 	// GITCommit overwritten automatically by the build
 	GITCOMMIT = "HEAD"
