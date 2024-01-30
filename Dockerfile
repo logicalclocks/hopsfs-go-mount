@@ -7,9 +7,9 @@ ARG userid=1000
 ARG groupid=1000
 ARG user=hopsfs
 
-RUN ulimit -n 1024000; yum -y update
-
-RUN ulimit -n 1024000; yum -y install wget git make
+RUN ulimit -n 1024000 && \
+   yum -y update && \
+   yum -y install wget git make
 
 RUN  cd /tmp; \
 wget https://go.dev/dl/go1.19.1.linux-amd64.tar.gz 
