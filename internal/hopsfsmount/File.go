@@ -69,6 +69,8 @@ func (file *FileINode) Attr(ctx context.Context, a *fuse.Attr) error {
 			if err != nil {
 				return err
 			}
+		} else {
+			logger.Info("Stat successful. Returning from Cache ", logger.Fields{Operation: GetattrFile, Path: file.AbsolutePath(), FileSize: file.Attrs.Size, IsDir: file.Attrs.Mode.IsDir(), IsRegular: file.Attrs.Mode.IsRegular()})
 		}
 	}
 	return file.Attrs.ConvertAttrToFuse(a)
@@ -207,9 +209,10 @@ func (file *FileINode) Setattr(ctx context.Context, req *fuse.SetattrRequest, re
 func (file *FileINode) Forget() {
 	file.lockFile()
 	defer file.unlockFile()
+	// see comment in Dir.go for Forget handler
 	// ask parent to remove me from the children list
-	logger.Debug(fmt.Sprintf("Forget for file %s", file.Attrs.Name), nil)
-	file.Parent.removeChildInode(Forget, file.Attrs.Name)
+	// logger.Debug(fmt.Sprintf("Forget for file %s", file.Attrs.Name), nil)
+	// file.Parent.removeChildInode(Forget, file.Attrs.Name)
 }
 
 func (file *FileINode) countActiveHandles() int {

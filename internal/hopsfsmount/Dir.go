@@ -64,7 +64,7 @@ func (dir *DirINode) Attr(ctx context.Context, a *fuse.Attr) error {
 			return err
 		}
 	} else {
-		logger.Info("Stat successful. Returning from Cache ", logger.Fields{Operation: GetattrDir, Path: path.Join(dir.AbsolutePath(), dir.Attrs.Name), FileSize: dir.Attrs.Size,
+		logger.Info("Stat successful. Returning from Cache ", logger.Fields{Operation: GetattrDir, Path: path.Join(dir.AbsolutePath()), FileSize: dir.Attrs.Size,
 			IsDir: dir.Attrs.Mode.IsDir(), IsRegular: dir.Attrs.Mode.IsRegular()})
 	}
 	return dir.Attrs.ConvertAttrToFuse(a)
@@ -128,21 +128,43 @@ func (dir *DirINode) removeChildInode(operation, name string) {
 	}
 }
 
+// used in rename. when an inode is moved from one dir to another
+func (dir *DirINode) adoptChildInode(operation, name string, node fs.Node) {
+	dir.lockChildrenMutex()
+	defer dir.unlockChildrenMutex()
+
+	if dir.children == nil {
+		dir.children = make(map[string]fs.Node)
+	}
+
+	if _, ok := dir.children[name]; ok {
+		logger.Debug("Children's List. Adopted inode. Replaced existing node ", logger.Fields{Operation: operation, Parent: dir.AbsolutePath(), Child: name, NumChildren: len(dir.children)})
+	} else {
+		logger.Debug("Children's List. Adopted inode. Added new node ", logger.Fields{Operation: operation, Parent: dir.AbsolutePath(), Child: name, NumChildren: len(dir.children)})
+	}
+
+	dir.children[name] = node
+}
+
 // Responds on FUSE request to lookup the directory
 func (dir *DirINode) Lookup(ctx context.Context, name string) (fs.Node, error) {
 	dir.lockMutex()
 	defer dir.unlockMutex()
 
+	return dir.LookupInt(Lookup, name)
+}
+
+func (dir *DirINode) LookupInt(opName string, name string) (fs.Node, error) {
 	if !dir.FileSystem.IsPathAllowed(dir.AbsolutePathForChild(name)) {
 		return nil, syscall.ENOENT
 	}
 
-	if node := dir.getChildInode(Lookup, name); node != nil {
+	if node := dir.getChildInode(opName, name); node != nil {
 		return node, nil
 	}
 
 	var attrs Attrs
-	node, err := dir.statInodeInHopsFS(Lookup, name, &attrs)
+	node, err := dir.statInodeInHopsFS(opName, name, &attrs)
 	if err != nil {
 		return nil, err
 	}
@@ -325,30 +347,61 @@ func (dir *DirINode) Remove(ctx context.Context, req *fuse.RemoveRequest) error 
 }
 
 // Responds on FUSE Rename request
-func (dir *DirINode) Rename(ctx context.Context, req *fuse.RenameRequest, newNode fs.Node) error {
-	dir.lockMutex()
-	defer dir.unlockMutex()
+func (srcParent *DirINode) Rename(ctx context.Context, req *fuse.RenameRequest, dstParentDir fs.Node) error {
+	srcParent.lockMutex()
+	defer srcParent.unlockMutex()
 
-	oldPath := dir.AbsolutePathForChild(req.OldName)
-	newPath := newNode.(*DirINode).AbsolutePathForChild(req.NewName)
-	logger.Info("Renaming to "+newPath, logger.Fields{Operation: Rename, Path: oldPath})
-	err := dir.FileSystem.getDFSConnector().Rename(oldPath, newPath)
-	if err == nil {
-		// Upon successful rename, updating in-memory representation of the file entry
-		if node := dir.getChildInode(Rename, req.OldName); node != nil {
-			if fnode, ok := (node).(*FileINode); ok {
-				fnode.Attrs.Name = req.NewName
-				fnode.Parent = newNode.(*DirINode)
-				newNode.(*DirINode).addOrUpdateChildInodeAttrs(Rename, req.NewName, fnode.Attrs)
-			} else if dnode, ok := (node).(*DirINode); ok {
-				dnode.Attrs.Name = req.NewName
-				dnode.Parent = newNode.(*DirINode)
-				newNode.(*DirINode).addOrUpdateChildInodeAttrs(Rename, req.NewName, dnode.Attrs)
-			}
-			dir.removeChildInode(Rename, req.OldName)
-		}
+	oldPath := srcParent.AbsolutePathForChild(req.OldName)
+	newPath := dstParentDir.(*DirINode).AbsolutePathForChild(req.NewName)
+	logger.Debug("Renaming", logger.Fields{Operation: Rename, From: oldPath, To: newPath})
+
+	srcInode, err := srcParent.LookupInt(Rename, req.OldName)
+	if err != nil {
+		logger.Error("Rename failed. Src Inode not found", logger.Fields{Operation: Rename, From: oldPath, To: newPath})
+		return err
 	}
-	return err
+
+	dstInode, err := dstParentDir.(*DirINode).LookupInt(Rename, req.NewName)
+	if err == nil {
+		logger.Debug("Rename. Dst Inode not found", logger.Fields{Operation: Rename, From: oldPath, To: newPath})
+	}
+
+	// update backend
+	err = srcParent.FileSystem.getDFSConnector().Rename(oldPath, newPath)
+	if err != nil {
+		logger.Error("Rename failed at the backend", logger.Fields{Operation: Rename, From: oldPath, To: newPath, Error: err})
+		return err
+	}
+
+	// disconnect src inode
+	if srcInode != nil {
+		srcParent.removeChildInode(Rename, req.OldName)
+	}
+
+	// disconnect dst inode
+	if dstInode != nil {
+		dstParentDir.(*DirINode).removeChildInode(Rename, req.NewName)
+	}
+
+	// Upon successful rename, updating in-memory representation of the file entry
+	// file rename
+	if fnode, ok := (srcInode).(*FileINode); ok {
+		logger.Trace("Rename src is file", logger.Fields{Operation: Rename, From: oldPath, To: newPath})
+		fnode.Attrs.Name = req.NewName
+		fnode.Parent = dstParentDir.(*DirINode)
+		dstParentDir.(*DirINode).adoptChildInode(Rename, req.NewName, fnode)
+	}
+
+	// dir rename
+	if dnode, ok := (srcInode).(*DirINode); ok {
+		logger.Trace("Rename src is dir", logger.Fields{Operation: Rename, From: oldPath, To: newPath})
+		dnode.Attrs.Name = req.NewName
+		dnode.Parent = dstParentDir.(*DirINode)
+		dstParentDir.(*DirINode).adoptChildInode(Rename, req.NewName, dnode)
+	}
+
+	logger.Info("Renamed", logger.Fields{Operation: Rename, From: oldPath, To: newPath})
+	return nil
 }
 
 // Responds on FUSE Chmod request
@@ -388,9 +441,18 @@ func (dir *DirINode) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp
 func (dir *DirINode) Forget() {
 	dir.lockMutex()
 	defer dir.unlockMutex()
+	// inodes are removed on delete and rename operations.
+	// this forget call is redundant and it causes problems.
+	// In the mount point we identify inodes by names.
+	// For example, we remove a file /some/dir/file. Before
+	// the forget call is processed if the user recreates the
+	// file /some/dir/file then processing forget request
+	// would lead to deleting a correct inode
+	// to fix this issue we have to use inode IDs
+
 	// ask parent to remove me from the children list
-	logger.Debug(fmt.Sprintf("Forget for dir %s", dir.Attrs.Name), nil)
-	dir.Parent.removeChildInode(Forget, dir.Attrs.Name)
+	// logger.Debug(fmt.Sprintf("Forget for dir %s", dir.Attrs.Name), nil)
+	// dir.Parent.removeChildInode(Forget, dir.Attrs.Name)
 }
 
 func (dir *DirINode) lockMutex() {

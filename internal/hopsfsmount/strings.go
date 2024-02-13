@@ -22,6 +22,8 @@ const (
 	Remove                        = "remove"
 	Create                        = "create"
 	Rename                        = "rename"
+	From                          = "from"
+	To                            = "to"
 	Chmod                         = "chmod"
 	Link                          = "link"
 	ReadLink                      = "read_link"

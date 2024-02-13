@@ -63,6 +63,66 @@ func TestSimple(t *testing.T) {
 	})
 }
 
+func TestRename1(t *testing.T) {
+
+	withMount(t, "/", func(mountPoint string, hdfsAccessor HdfsAccessor) {
+
+		// perform this N number of
+		//   1. rename file1 -> file2
+		//   2. rename file2 -> file1
+		//   3. check file stats
+		file1 := filepath.Join(mountPoint, "file1")
+		file2 := filepath.Join(mountPoint, "file2")
+		t.Run("test1", func(t *testing.T) {
+			renameTestInt(t, file1, file2)
+		})
+
+		file1 = filepath.Join(mountPoint, "file1")
+		dir := filepath.Join(mountPoint, "/dir")
+		file2 = filepath.Join(mountPoint, "/dir/file2")
+		rmDir(t, dir)
+		mkdir(t, dir)
+		t.Run("test2", func(t *testing.T) {
+			renameTestInt(t, file1, file2)
+		})
+
+	})
+
+}
+
+func renameTestInt(t *testing.T, file1, file2 string) {
+
+	if err := createFile(file1, "some_data"); err != nil {
+		t.Fatalf("Failed %v", err)
+	}
+	defer os.Remove(file1)
+
+	if err := createFile(file2, "some_data"); err != nil {
+		t.Fatalf("Failed %v", err)
+	}
+	defer os.Remove(file2)
+
+	for i := 0; i < 20; i++ {
+		logger.Debug(fmt.Sprintf("_____ %d _____", i), nil)
+
+		if err := os.Rename(file1, file2); err != nil {
+			t.Fatalf("Failed %v", err)
+		}
+
+		if err := os.Rename(file2, file1); err != nil {
+			t.Fatalf("Failed %v", err)
+		}
+
+		fi, err := os.Stat(file1)
+		if err != nil {
+			t.Fatalf("Stat Failed %v", err)
+		}
+		logger.Debug(fmt.Sprintf("Stat worked. File Size: %d", fi.Size()), nil)
+
+		time.Sleep(time.Microsecond * 100)
+	}
+}
+
 func TestTruncate(t *testing.T) {
 
 	withMount(t, "/", func(mountPoint string, hdfsAccessor HdfsAccessor) {
@@ -535,7 +595,7 @@ func withMount(t testing.TB, srcDir string, fn func(mntPath string, hdfsAccessor
 	// Wrapping with FaultTolerantHdfsAccessor
 	retryPolicy := NewDefaultRetryPolicy(WallClock{})
 	retryPolicy.MaxAttempts = 1 // for quick failure
-	logger.InitLogger("WARN", false, "")
+	logger.InitLogger("debug", false, "")
 	hdfsAccessor, _ := NewHdfsAccessor("localhost:8020", WallClock{}, TLSConfig{TLS: false, RootCABundle: RootCABundle, ClientCertificate: ClientCertificate, ClientKey: ClientKey})
 	err := hdfsAccessor.EnsureConnected()
 	if err != nil {
