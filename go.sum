@@ -95,6 +95,8 @@ github.com/logicalclocks/hopsfs-go-client/v2 v2.5.3 h1:zhSNkeMBA6FV06gPj9DoFz1LI
 github.com/logicalclocks/hopsfs-go-client/v2 v2.5.3/go.mod h1:0NAO+/3knbMx6+5pCv+Hcbaz4xn/Zzbn9+WIib2rKVI=
 github.com/logicalclocks/hopsfs-go-client/v2 v2.5.4 h1:jAgT71ofkVlsh29HGDd0pAbPs5XgqgwKTUqv93SrLLU=
 github.com/logicalclocks/hopsfs-go-client/v2 v2.5.4/go.mod h1:0NAO+/3knbMx6+5pCv+Hcbaz4xn/Zzbn9+WIib2rKVI=
+github.com/logicalclocks/hopsfs-go-client/v2 v2.5.5 h1:oVbaChiAdgbx7DtadxAczyLIU+HNd4oagHcQ8SxWCb0=
+github.com/logicalclocks/hopsfs-go-client/v2 v2.5.5/go.mod h1:0NAO+/3knbMx6+5pCv+Hcbaz4xn/Zzbn9+WIib2rKVI=
 github.com/matryer/is v1.2.0 h1:92UTHpy8CDwaJ08GqLDzhhuixiBUUD1p3AU6PHddz4A=
 github.com/matryer/is v1.2.0/go.mod h1:2fLPjFQM9rhQ15aVEtbuwhJinnOqrmgXPNdZsdwlWXA=
 github.com/niemeyer/pretty v0.0.0-20200227124842-a10e7caefd8e/go.mod h1:zD1mROLANZcx1PVRCS0qkT7pwLkGfwJo4zjcN/Tysno=
