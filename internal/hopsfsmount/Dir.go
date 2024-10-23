@@ -39,6 +39,7 @@ var _ fs.NodeSymlinker = (*DirINode)(nil)
 var _ fs.NodeReadlinker = (*DirINode)(nil)
 var _ fs.NodeLinker = (*DirINode)(nil)
 var _ fs.NodeCreater = (*DirINode)(nil)
+var _ fs.NodeFsyncer = (*DirINode)(nil)
 
 // Returns absolute path of the dir in HDFS namespace
 func (dir *DirINode) AbsolutePath() string {
@@ -508,4 +509,12 @@ func (dir *DirINode) Readlink(ctx context.Context, req *fuse.ReadlinkRequest) (s
 func (dir *DirINode) Link(ctx context.Context, req *fuse.LinkRequest, old fs.Node) (fs.Node, error) {
 	logger.Error("Unsupported Link operation.", logger.Fields{Operation: Link, Path: dir.AbsolutePath()})
 	return nil, syscall.ENOTSUP
+}
+
+// https://libfuse.github.io/doxygen/structfuse__operations.html#abaa2a0bdc9b9955a399ea6973f6f4927
+// Synchronize directory contents
+// All dir operations are first performed on the backend. So no-op
+func (dir *DirINode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
+	logger.Info("Fsync called on Dir ", logger.Fields{Operation: Fsync, Path: dir.AbsolutePath()})
+	return nil
 }
