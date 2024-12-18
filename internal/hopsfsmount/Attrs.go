@@ -35,7 +35,7 @@ type FsInfo struct {
 // Converts Attrs datastructure into FUSE represnetation
 func (attrs *Attrs) ConvertAttrToFuse(a *fuse.Attr) error {
 	a.Inode = attrs.Inode
-	a.Mode = attrs.Mode
+	a.Mode = ComputePermissions(attrs.Mode)
 	if (a.Mode & os.ModeDir) == 0 {
 		a.Size = attrs.Size
 	}
