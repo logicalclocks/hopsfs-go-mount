@@ -8,35 +8,23 @@ ARG groupid=1000
 ARG user=hopsfs
 
 RUN yum -y update && \
-   yum -y install wget git make build-essential
+   yum -y install wget git make
 
 RUN  cd /tmp; \
-wget https://go.dev/dl/go1.19.1.linux-amd64.tar.gz
+wget https://go.dev/dl/go1.19.1.linux-amd64.tar.gz 
+
 
 RUN cd /tmp; \
 ls -al; \
 rm -rf /usr/local/go; \
-tar -C /usr/local -xzf go1.19.1.linux-amd64.tar.gz
+tar -C /usr/local -xzf go1.19.1.linux-amd64.tar.gz 
 
 RUN groupadd hopsfs --gid ${groupid}; \
-useradd -ms /bin/bash hopsfs --uid ${userid} --gid ${groupid};
+useradd -ms /bin/bash hopsfs --uid ${userid} --gid ${groupid}; 
 
-RUN mkdir /src &&  \
-    chmod 777 /src && \
-    git config --global --add safe.directory /src
-
-RUN mkdir /go && \
-    chmod 777 /go
-
-USER hopsfs
+RUN mkdir /src; \
+chown ${user}:${user} /src
 
 RUN echo "export PATH=$PATH:/usr/local/go/bin" >> /home/hopsfs/.bashrc
 
-RUN echo "export GOPATH=/go" >> /home/hopsfs/.bashrc
-
-RUN source /home/hopsfs/.bashrc && \
-    go install github.com/golang/mock/mockgen@v1.6.0 && \
-    echo "export PATH=$PATH:/go/bin" >> /home/hopsfs/.bashrc \
-
 USER hopsfs
-#USER root
