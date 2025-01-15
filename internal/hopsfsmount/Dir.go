@@ -442,7 +442,6 @@ func (dir *DirINode) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp
 	}
 
 	if req.Valid.Mode() {
-		req.Mode = ComputePermissions(req.Mode)
 		if err := ChmodOp(&dir.Attrs, dir.FileSystem, path, req, resp); err != nil {
 			logger.Warn("Setattr (chmod) failed. ", logger.Fields{Operation: Chmod, Path: path, Mode: req.Mode})
 			return err

@@ -168,7 +168,6 @@ func (file *FileINode) Setattr(ctx context.Context, req *fuse.SetattrRequest, re
 	file.lockFile()
 	defer file.unlockFile()
 
-	req.Mode = ComputePermissions(req.Mode)
 	logger.Debug("Setattr request received: ", logger.Fields{Operation: Setattr})
 
 	if req.Valid.Size() {
