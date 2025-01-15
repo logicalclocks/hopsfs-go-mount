@@ -4,6 +4,7 @@
 package hopsfsmount
 
 import (
+	"os"
 	"syscall"
 	"time"
 
@@ -138,4 +139,16 @@ func getGroupNameFromPath(path string) string {
 	}
 
 	return result[0][1] + "__" + result[0][2]
+}
+
+func ComputePermissions(defaultPerm os.FileMode) os.FileMode {
+	if UserUmask == "" {
+		return defaultPerm
+	}
+	var fullPermissions os.FileMode = 0777
+	mode := fullPermissions &^ Umask
+	if defaultPerm.IsDir() {
+		return mode | os.ModeDir
+	}
+	return mode
 }

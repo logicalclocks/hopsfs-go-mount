@@ -230,7 +230,7 @@ func (file *FileINode) createStagingFile(operation string, existsInDFS bool) (*o
 	absPath := file.AbsolutePath()
 	hdfsAccessor := file.FileSystem.getDFSConnector()
 	if !existsInDFS { // it  is a new file so create it in the DFS
-		w, err := hdfsAccessor.CreateFile(absPath, file.Attrs.Mode, false)
+		w, err := hdfsAccessor.CreateFile(absPath, ComputePermissions(file.Attrs.Mode), false)
 		if err != nil {
 			logger.Error("Failed to create file in DFS", file.logInfo(logger.Fields{Operation: operation, Error: err}))
 			return nil, err

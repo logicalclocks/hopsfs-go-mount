@@ -5,6 +5,7 @@ package hopsfsmount
 
 import (
 	"fmt"
+	"github.com/colinmarc/hdfs/v2"
 	"os"
 	"path"
 	"sync"
@@ -12,7 +13,6 @@ import (
 
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
-	"github.com/colinmarc/hdfs/v2"
 	"golang.org/x/net/context"
 	"hopsworks.ai/hopsfsmount/internal/hopsfsmount/logger"
 )
@@ -241,7 +241,7 @@ func (dir *DirINode) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node
 			GetGroupFromHopsFSDatasetPath: UseGroupFromHopsFsDatasetPath})
 		return nil, err
 	}
-
+	req.Mode = ComputePermissions(req.Mode)
 	err = dir.FileSystem.getDFSConnector().Mkdir(dir.AbsolutePathForChild(req.Name), req.Mode)
 	if err != nil {
 		logger.Info("mkdir failed", logger.Fields{Operation: Mkdir, Path: path.Join(dir.AbsolutePath(), req.Name), Error: err})
@@ -275,6 +275,7 @@ func (dir *DirINode) Create(ctx context.Context, req *fuse.CreateRequest, resp *
 	dir.lockMutex()
 	defer dir.unlockMutex()
 
+	req.Mode = ComputePermissions(req.Mode)
 	logger.Info("Creating a new file", logger.Fields{Operation: Create, Path: dir.AbsolutePathForChild(req.Name), Mode: req.Mode, Flags: req.Flags})
 
 	// first determine the usename and grup name for the new file

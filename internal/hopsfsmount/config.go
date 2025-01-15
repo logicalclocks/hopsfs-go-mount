@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"golang.org/x/sys/unix"
 	"log"
 	"os"
 	"os/user"
@@ -38,6 +39,8 @@ var EnablePageCache = false
 var CacheAttrsTimeSecs = 5
 var FallBackUser = "root"
 var FallBackGroup = "root"
+var UserUmask string = ""
+var Umask os.FileMode = 0007
 
 func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	flag.BoolVar(&LazyMount, "lazy", false, "Allows to mount HopsFS filesystem before HopsFS is available")
@@ -64,6 +67,7 @@ func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	flag.IntVar(&CacheAttrsTimeSecs, "cacheAttrsTimeSecs", 5, "Cache INodes' Attrs. Set to 0 to disable caching INode attrs.")
 	flag.StringVar(&FallBackUser, "fallBackUser", "root", "Local user name if the DFS user is not found on the local file system")
 	flag.StringVar(&FallBackGroup, "fallBackGroup", "root", "Local group name if the DFS group is not found on the local file system.")
+	flag.StringVar(&UserUmask, "umask", "", "Umask for the file system. Must be a 4 digit octal number. Default is system umask")
 
 	flag.Usage = usage
 	flag.Parse()
@@ -92,11 +96,17 @@ func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 		CacheAttrsTimeDuration = time.Second * time.Duration(CacheAttrsTimeSecs)
 	}
 
+	Umask, err := ValidateUmask(UserUmask)
+	if err != nil {
+		log.Fatalf("Invalid umask provided: %v", err)
+	}
+
 	// validate the defaultFallBackOwner
-	err := validateFallBackUserAndGroup()
+	err = validateFallBackUserAndGroup()
 	if err != nil {
 		log.Fatalf("Error validating default user and/or group: %v", err)
 	}
+	logger.Info(fmt.Sprintf("Using umask: %o", Umask), nil)
 
 	logger.Info(fmt.Sprintf("Staging dir is:%s, Using TLS: %v, RetryAttempts: %d,  LogFile: %s", StagingDir, Tls, retryPolicy.MaxAttempts, LogFile), nil)
 	logger.Info(fmt.Sprintf("hopsfs-mount: current head GITCommit: %s Built time: %s Built by: %s ", GITCOMMIT, BUILDTIME, HOSTNAME), nil)
@@ -187,4 +197,41 @@ func validateFallBackUserAndGroup() error {
 	ugcache.FallBackGID = uint32(gid64)
 
 	return nil
+}
+
+func ValidateUmask(umask string) (os.FileMode, error) {
+	if umask == "" {
+		systemUmask := unix.Umask(0022)
+		unix.Umask(systemUmask) // reset umask
+		logger.Info(fmt.Sprintf("Using system umask: %o", systemUmask), nil)
+		return os.FileMode(systemUmask), nil
+	}
+
+	if !isNumeric(umask) {
+		return 0, errors.New("umask must contain only digits")
+	}
+
+	if len(umask) < 3 || len(umask) > 4 {
+		return 0, errors.New("umask must be exactly 3 or 4 digits")
+	}
+
+	value, err := strconv.ParseInt(umask, 8, 32)
+	if err != nil {
+		return 0, errors.New("invalid umask value")
+	}
+
+	if value < 0 || value > 0777 {
+		return 0, errors.New("umask must be within the range 0000 to 0777")
+	}
+
+	return os.FileMode(value), nil
+}
+
+func isNumeric(s string) bool {
+	for _, char := range s {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
 }
