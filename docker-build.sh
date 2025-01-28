@@ -15,8 +15,8 @@ if [ "$1" == "-h" ] || [ "$1" == "--help" ]; then
 fi
 
 PREFIX=$1
-USERID=`id -u`
-GROUPID=`id -g`
+USERID=1000
+GROUPID=1000
 
 command -v "docker"
 if [[ "${?}" -ne 0 ]]; then
@@ -25,7 +25,7 @@ if [[ "${?}" -ne 0 ]]; then
 fi
 
 VERSION=`grep VERSION ./internal/hopsfsmount/Version.go | sed 's/[\t A-Z"=]//g'`
-
+VERSION=$(echo "$VERSION" | awk '{$1=$1};1')
 rm -rf bin/*
 
 DOCKER_IMAGE="hopsfs_mount:${VERSION}"
@@ -34,7 +34,7 @@ if [ "$PREFIX" != "" ]; then
 fi
 
 echo "Creating docker image ${DOCKER_IMAGE}"
-docker build --build-arg userid=${USERID} --build-arg groupid=${GROUPID} . -t $DOCKER_IMAGE
+docker build --progress=plain --build-arg userid=${USERID} --build-arg groupid=${GROUPID} . -t "$DOCKER_IMAGE"
 
 echo "Building $platform using $DOCKER_IMAGE"
 docker run --rm -v $DIR:/src -w /src --user hopsfs "$DOCKER_IMAGE" /bin/bash -l build 

@@ -57,5 +57,7 @@ Options:
         Enables tls connections
   -version
         Print version
+  -umask string
+        Umask for the file system. Must be a 4 digit octal number.
 ```
 
