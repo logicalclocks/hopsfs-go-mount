@@ -71,6 +71,9 @@ func TestUmaskBasedPermissions(t *testing.T) {
 		{
 			"0022", os.FileMode(0022), os.FileMode(0775), os.FileMode(0755), false,
 		},
+		{
+			"0077", os.FileMode(0077), os.FileMode(0755), os.FileMode(0700), true,
+		},
 	}
 
 	currentUmask := unix.Umask(0)
@@ -86,23 +89,23 @@ func TestUmaskBasedPermissions(t *testing.T) {
 			mockCtrl := gomock.NewController(t)
 			mockClock := &MockClock{}
 			hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
-			dir, err := GenerateTestDir()
+			testFile, err := GenerateTestDir()
 			assert.Nil(t, err)
-			dir = "/" + dir
-			hdfsAccessor.EXPECT().Chown(dir, gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
-			// We should expect the file or dir to be created with the expected permissions in hopsfs
-			expected := ComputePermissions(tc.ExpectedFilePermission)
+			testFile = "/" + testFile
+			hdfsAccessor.EXPECT().Chown(testFile, gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+			// We should expect the file or testFile to be created with the expected permissions in hopsfs
+			expected := tc.ExpectedFilePermission
 			if tc.Dir {
-				expected = ComputePermissions(tc.ExpectedFilePermission) | os.ModeDir
+				expected = tc.ExpectedFilePermission | os.ModeDir
 			}
-			hdfsAccessor.EXPECT().Mkdir(dir, expected).Return(nil).AnyTimes()
+			hdfsAccessor.EXPECT().Mkdir(testFile, expected).Return(nil).AnyTimes()
 			fs, _ := NewFileSystem([]HdfsAccessor{hdfsAccessor}, "/", []string{"*"}, false, NewDefaultRetryPolicy(mockClock), mockClock)
 			root, _ := fs.Root()
 			defaultPermissions := tc.DefaultPermissions
 			if tc.Dir {
 				defaultPermissions = tc.DefaultPermissions | os.ModeDir
 			}
-			_, err = root.(*DirINode).Mkdir(nil, &fuse.MkdirRequest{Name: dir, Mode: defaultPermissions})
+			_, err = root.(*DirINode).Mkdir(nil, &fuse.MkdirRequest{Name: testFile, Mode: defaultPermissions})
 			// If no errors then the files or dirs are being created with the expected permissions otherwise the our mock would fail
 			assert.Nil(t, err)
 		})
