@@ -1,16 +1,14 @@
 # Copyright (c) Hopsworks AB. All rights reserved.
 # Licensed under the MIT license. See LICENSE file in the project root for details.
 
-FROM ubuntu:22.04
+FROM oraclelinux:8
 
 ARG userid=1000
 ARG groupid=1000
 ARG user=hopsfs
 
-RUN apt-get -y update && \
-    apt-get install -y wget git make build-essential && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+RUN yum -y update && \
+    yum install -y wget git make
 
 RUN  cd /tmp; \
 wget https://go.dev/dl/go1.19.1.linux-amd64.tar.gz 
