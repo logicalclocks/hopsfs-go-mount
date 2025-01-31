@@ -40,7 +40,7 @@ var CacheAttrsTimeSecs = 5
 var FallBackUser = "root"
 var FallBackGroup = "root"
 var UserUmask string = ""
-var Umask os.FileMode = 0007
+var Umask os.FileMode
 
 func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	flag.BoolVar(&LazyMount, "lazy", false, "Allows to mount HopsFS filesystem before HopsFS is available")
@@ -67,7 +67,7 @@ func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	flag.IntVar(&CacheAttrsTimeSecs, "cacheAttrsTimeSecs", 5, "Cache INodes' Attrs. Set to 0 to disable caching INode attrs.")
 	flag.StringVar(&FallBackUser, "fallBackUser", "root", "Local user name if the DFS user is not found on the local file system")
 	flag.StringVar(&FallBackGroup, "fallBackGroup", "root", "Local group name if the DFS group is not found on the local file system.")
-	flag.StringVar(&UserUmask, "umask", "", "Umask for the file system. Must be a 4 digit octal number. Default is system umask")
+	flag.StringVar(&UserUmask, "umask", "", "Umask for the file system. Must be a 4 digit octal number.")
 
 	flag.Usage = usage
 	flag.Parse()
@@ -96,7 +96,7 @@ func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 		CacheAttrsTimeDuration = time.Second * time.Duration(CacheAttrsTimeSecs)
 	}
 
-	Umask, err := ValidateUmask(UserUmask)
+	_, err := ValidateUmask(UserUmask)
 	if err != nil {
 		log.Fatalf("Invalid umask provided: %v", err)
 	}
@@ -223,8 +223,8 @@ func ValidateUmask(umask string) (os.FileMode, error) {
 	if value < 0 || value > 0777 {
 		return 0, errors.New("umask must be within the range 0000 to 0777")
 	}
-
-	return os.FileMode(value), nil
+	Umask = os.FileMode(value)
+	return Umask, nil
 }
 
 func isNumeric(s string) bool {

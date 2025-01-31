@@ -145,10 +145,24 @@ func ComputePermissions(defaultPerm os.FileMode) os.FileMode {
 	if UserUmask == "" {
 		return defaultPerm
 	}
-	var fullPermissions os.FileMode = 0777
+	var fullPermissions = os.FileMode(0777)
 	mode := fullPermissions &^ Umask
+	// Update execute permissions for owner, group, and others
+	// The executable bit is only set if the given umask allows it and the default permissions have it set
+	mode = updateExecutableBit(mode, defaultPerm, 0100, Umask&0100 == 0) // Owner
+	mode = updateExecutableBit(mode, defaultPerm, 0010, Umask&0010 == 0) // Group
+	mode = updateExecutableBit(mode, defaultPerm, 0001, Umask&0001 == 0) // Others
 	if defaultPerm.IsDir() {
 		return mode | os.ModeDir
+	}
+	return mode
+}
+
+func updateExecutableBit(mode, defaultPerm os.FileMode, bit os.FileMode, umaskAllows bool) os.FileMode {
+	if umaskAllows && defaultPerm&bit != 0 {
+		mode |= bit
+	} else {
+		mode &^= bit
 	}
 	return mode
 }
