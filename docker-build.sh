@@ -15,8 +15,8 @@ if [ "$1" == "-h" ] || [ "$1" == "--help" ]; then
 fi
 
 PREFIX=$1
-USERID=1000
-GROUPID=1000
+USERID=`id -u`
+GROUPID=`id -g`
 
 command -v "docker"
 if [[ "${?}" -ne 0 ]]; then

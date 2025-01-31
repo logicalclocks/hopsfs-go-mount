@@ -24,7 +24,7 @@ useradd -ms /bin/bash hopsfs --uid ${userid} --gid ${groupid};
 
 
 RUN mkdir /src; \
-chown ${user}:${user} /src
+chmod 777 /src
 
 ENV PATH=$PATH:/usr/local/go/bin
 ENV GOPATH=/go
