@@ -27,6 +27,8 @@ Options:
         log FUSE processing details
   -getGroupFromHopsFSDatasetPath
         Get the group from hopsfs dataset path. This will work if a hopsworks project is mounted
+  -hopsFSGroupName string
+    	HopsFS groupname
   -hopsFSUserName string
         HopsFS username
   -lazy
