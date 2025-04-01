@@ -88,7 +88,9 @@ func getUserName(uid uint32) (string, error) {
 
 func getGroupName(path string, gid uint32) (string, error) {
 	var groupName string
-	if UseGroupFromHopsFsDatasetPath {
+	if ForceOverrideGroupname != "" {
+		groupName = ForceOverrideGroupname
+	} else if UseGroupFromHopsFsDatasetPath {
 		groupName = getGroupNameFromPath(path)
 	} else {
 		groupName = ugcache.LookupGroupName(gid)

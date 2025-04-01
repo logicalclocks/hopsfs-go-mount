@@ -15,6 +15,11 @@ if [ "$1" == "-h" ] || [ "$1" == "--help" ]; then
 fi
 
 PREFIX=$1
+PLATFORM=$2
+if [ "$PLATFORM" == "" ]; then
+  PLATFORM="linux/amd64"
+fi
+
 USERID=`id -u`
 GROUPID=`id -g`
 
@@ -34,7 +39,7 @@ if [ "$PREFIX" != "" ]; then
 fi
 
 echo "Creating docker image ${DOCKER_IMAGE}"
-docker build --progress=plain --build-arg userid=${USERID} --build-arg groupid=${GROUPID} . -t "$DOCKER_IMAGE"
+docker build --progress=plain --platform=$PLATFORM --build-arg userid=${USERID} --build-arg groupid=${GROUPID} . -t "$DOCKER_IMAGE"
 
 echo "Building $platform using $DOCKER_IMAGE"
 docker run --rm -v $DIR:/src -w /src --user hopsfs "$DOCKER_IMAGE" /bin/bash -l build 
