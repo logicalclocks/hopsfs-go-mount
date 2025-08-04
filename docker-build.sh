@@ -29,7 +29,7 @@ if [[ "${?}" -ne 0 ]]; then
   exit 1
 fi
 
-VERSION=`grep VERSION ./internal/hopsfsmount/Version.go | sed 's/[\t A-Z"=]//g'`
+VERSION=$(grep VERSION ./internal/hopsfsmount/Version.go | sed -E 's/.*"([^"]+)".*/\1/')
 VERSION=$(echo "$VERSION" | awk '{$1=$1};1')
 rm -rf bin/*
 
