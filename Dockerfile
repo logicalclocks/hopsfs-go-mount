@@ -7,8 +7,10 @@ ARG userid=1000
 ARG groupid=1000
 ARG user=hopsfs
 
+# Install required packages (including gcc, hostname, tar, gzip, and git)
 RUN yum -y update && \
-    yum install -y wget git make
+    yum install -y wget git make gcc hostname tar gzip && \
+    yum clean all
 
 RUN  cd /tmp; \
 wget https://go.dev/dl/go1.19.1.linux-amd64.tar.gz 
