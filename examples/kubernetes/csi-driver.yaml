@@ -1,0 +1,123 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hopsfs-csi-driver
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hopsfs-csi-driver
+rules:
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["persistentvolumes"]
+  verbs: ["get", "list", "watch", "create", "delete"]
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["get", "list", "watch", "update"]
+- apiGroups: ["storage.k8s.io"]
+  resources: ["storageclasses"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["storage.k8s.io"]
+  resources: ["csinodes"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["storage.k8s.io"]
+  resources: ["volumeattachments"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hopsfs-csi-driver
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: hopsfs-csi-driver
+subjects:
+- kind: ServiceAccount
+  name: hopsfs-csi-driver
+  namespace: kube-system
+---
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: hopsfs.csi.hopsworks.ai
+spec:
+  attachRequired: false
+  podInfoOnMount: false
+  volumeLifecycleModes:
+  - Persistent
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: hopsfs-csi-driver
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: hopsfs-csi-driver
+  template:
+    metadata:
+      labels:
+        app: hopsfs-csi-driver
+    spec:
+      serviceAccount: hopsfs-csi-driver
+      hostNetwork: true
+      containers:
+      - name: csi-driver
+        image: hopsworks/hopsfs-csi-driver:latest
+        args:
+        - "--endpoint=unix:///var/lib/kubelet/plugins/hopsfs.csi.hopsworks.ai/csi.sock"
+        - "--node-id=$(NODE_ID)"
+        env:
+        - name: NODE_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        volumeMounts:
+        - name: plugin-dir
+          mountPath: /var/lib/kubelet/plugins/hopsfs.csi.hopsworks.ai
+        - name: csi-dir
+          mountPath: /var/lib/kubelet/plugins/kubernetes.io/csi
+          mountPropagation: Bidirectional
+        - name: mountpoint-dir
+          mountPath: /var/lib/kubelet/pods
+          mountPropagation: Bidirectional
+        securityContext:
+          privileged: true
+      - name: csi-node-driver-registrar
+        image: k8s.gcr.io/sig-storage/csi-node-driver-registrar:v2.5.0
+        args:
+        - "--csi-address=$(ADDRESS)"
+        - "--kubelet-registration-path=$(DRIVER_REG_SOCK_PATH)"
+        env:
+        - name: ADDRESS
+          value: /var/lib/kubelet/plugins/hopsfs.csi.hopsworks.ai/csi.sock
+        - name: DRIVER_REG_SOCK_PATH
+          value: /var/lib/kubelet/plugins/hopsfs.csi.hopsworks.ai/csi.sock
+        volumeMounts:
+        - name: plugin-dir
+          mountPath: /var/lib/kubelet/plugins/hopsfs.csi.hopsworks.ai
+        - name: registration-dir
+          mountPath: /registration
+      volumes:
+      - name: plugin-dir
+        hostPath:
+          path: /var/lib/kubelet/plugins/hopsfs.csi.hopsworks.ai
+          type: DirectoryOrCreate
+      - name: registration-dir
+        hostPath:
+          path: /var/lib/kubelet/plugins_registry
+          type: Directory
+      - name: csi-dir
+        hostPath:
+          path: /var/lib/kubelet/plugins/kubernetes.io/csi
+          type: DirectoryOrCreate
+      - name: mountpoint-dir
+        hostPath:
+          path: /var/lib/kubelet/pods
+          type: Directory

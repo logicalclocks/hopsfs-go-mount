@@ -1,0 +1,21 @@
+# Dockerfile for HopsFS CSI Driver
+FROM golang:1.19-alpine AS builder
+
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN go build -tags osusergo,netgo -ldflags="-w" -o hopsfs-csi-driver ./cmd/csi-driver/main.go
+
+FROM alpine:latest
+
+# Install dependencies for mounting
+RUN apk add --no-cache util-linux fuse
+
+# Create necessary directories
+RUN mkdir -p /var/lib/kubelet/plugins/hopsfs.csi.hopsworks.ai
+
+COPY --from=builder /app/hopsfs-csi-driver /usr/local/bin/
+
+ENTRYPOINT ["/usr/local/bin/hopsfs-csi-driver"]

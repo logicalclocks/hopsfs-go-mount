@@ -10,11 +10,15 @@ VERSION=$(shell grep "VERSION" internal/hopsfsmount/Version.go | awk '{ print $$
 TEST?=Test
 TEST_PACKAGE?=./...
 
-all: hopsfs-mount 
+all: hopsfs-mount hopsfs-csi-driver
 
 hopsfs-mount:
 	go build -tags osusergo,netgo -ldflags="-w -X hopsworks.ai/hopsfsmount/internal/hopsfsmount.GITCOMMIT=${GITCOMMIT} -X hopsworks.ai/hopsfsmount/internal/hopsfsmount.BUILDTIME=${BUILDTIME} -X hopsworks.ai/hopsfsmount/internal/hopsfsmount.HOSTNAME=${HOSTNAME}" -o bin/hops-fuse-mount-${VERSION} ./cmd/main.go
 	chmod +x bin/hops-fuse-mount-${VERSION}
+
+hopsfs-csi-driver:
+	go build -tags osusergo,netgo -ldflags="-w -X hopsworks.ai/hopsfsmount/internal/hopsfsmount.GITCOMMIT=${GITCOMMIT} -X hopsworks.ai/hopsfsmount/internal/hopsfsmount.BUILDTIME=${BUILDTIME} -X hopsworks.ai/hopsfsmount/internal/hopsfsmount.HOSTNAME=${HOSTNAME}" -o bin/hopsfs-csi-driver-${VERSION} ./cmd/csi-driver/main.go
+	chmod +x bin/hopsfs-csi-driver-${VERSION}
 
 clean:
 	rm -f bin/* \

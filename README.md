@@ -3,7 +3,11 @@ What is hopsfs-mount
 
 Allows to mount remote HopsFS as a local Linux filesystem and allow arbitrary applications / shell scripts to access HopsFS as normal files and directories in efficient and secure way.
 
-Usage 
+The project now includes:
+- **FUSE Mount**: Traditional FUSE-based filesystem mounting (`hops-fuse-mount`)
+- **CSI Driver**: Container Storage Interface driver for Kubernetes (`hopsfs-csi-driver`)
+
+## FUSE Mount Usage 
 -----
 
 ```
@@ -62,4 +66,30 @@ Options:
   -umask string
         Umask for the file system. Must be a 4 digit octal number.
 ```
+
+## CSI Driver for Kubernetes
+
+The CSI driver allows you to use HopsFS as persistent volumes in Kubernetes clusters.
+
+### Build CSI Driver
+
+```bash
+make hopsfs-csi-driver
+```
+
+### Usage
+
+See [CSI_DRIVER.md](CSI_DRIVER.md) for detailed instructions on deploying and using the HopsFS CSI driver in Kubernetes.
+
+## Building
+
+To build both the FUSE mount and CSI driver:
+
+```bash
+make all
+```
+
+This creates:
+- `bin/hops-fuse-mount-<version>` - FUSE mount binary
+- `bin/hopsfs-csi-driver-<version>` - CSI driver binary
 
