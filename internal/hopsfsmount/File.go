@@ -31,6 +31,7 @@ type FileINode struct {
 	fileMutex       sync.Mutex    // mutex for file operation such as open, delete
 	fileProxy       FileProxy     // file proxy. Could be LocalRWFileProxy or RemoteFileProxy
 	fileHandleMutex sync.Mutex    // mutex for file handle
+	dataMutex       sync.Mutex    // mutex for file handle
 }
 
 // Verify that *File implements necesary FUSE interfaces
@@ -47,34 +48,40 @@ func (file *FileINode) AbsolutePath() string {
 
 // Responds to the FUSE file attribute request
 func (file *FileINode) Attr(ctx context.Context, a *fuse.Attr) error {
-	file.lockFile()
-	defer file.unlockFile()
-
-	// if the file is open for writing then update the file length and mtime
-	// from the straging file.
-	// Otherwise read the stats from the cache if it is valid.
-
-	if lrwfp, ok := file.fileProxy.(*LocalRWFileProxy); ok {
+	// Check fileProxy under fileHandleMutex to avoid race with closeStaging()
+	file.lockFileHandles()
+	lrwfp, hasLocalProxy := file.fileProxy.(*LocalRWFileProxy)
+	if hasLocalProxy {
+		// Keep lock held while we stat to prevent close race
 		fileInfo, err := lrwfp.localFile.Stat()
+		file.unlockFileHandles()
 		if err != nil {
 			logger.Warn("stat failed on staging file", logger.Fields{Operation: GetattrFile, Path: file.AbsolutePath(), Error: err})
 			return err
 		}
-		// update the local cache
+		// update the local cache under fileMutex
+		file.lockFile()
 		file.Attrs.Size = uint64(fileInfo.Size())
 		file.Attrs.Mtime = fileInfo.ModTime()
-	} else {
-		if file.FileSystem.Clock.Now().After(file.Attrs.Expires) {
-			_, err := file.Parent.statInodeInHopsFS(GetattrFile, file.Attrs.Name, &file.Attrs)
-			if err != nil {
-				return err
-			}
-		} else {
-			logger.Info("Stat successful. Returning from Cache ", logger.Fields{Operation: GetattrFile, Path: file.AbsolutePath(), FileSize: file.Attrs.Size, IsDir: file.Attrs.Mode.IsDir(), IsRegular: file.Attrs.Mode.IsRegular()})
+		err = file.Attrs.ConvertAttrToFuse(a)
+		file.unlockFile()
+		return err
+	}
+	file.unlockFileHandles()
+
+	// No local proxy - use cache or fetch from backend
+	file.lockFile()
+	defer file.unlockFile()
+
+	if file.FileSystem.Clock.Now().After(file.Attrs.Expires) {
+		_, err := file.Parent.statInodeInHopsFS(GetattrFile, file.Attrs.Name, &file.Attrs)
+		if err != nil {
+			return err
 		}
+	} else {
+		logger.Info("Stat successful. Returning from Cache ", logger.Fields{Operation: GetattrFile, Path: file.AbsolutePath(), FileSize: file.Attrs.Size, IsDir: file.Attrs.Mode.IsDir(), IsRegular: file.Attrs.Mode.IsRegular()})
 	}
 	return file.Attrs.ConvertAttrToFuse(a)
-
 }
 
 // Responds to the FUSE file open request (creates new file handle)
@@ -108,9 +115,8 @@ func (file *FileINode) AddHandle(handle *FileHandle) {
 
 // Unregisters an opened file handle
 func (file *FileINode) RemoveHandle(handle *FileHandle) {
-	file.lockFile()
-	defer file.unlockFile()
-
+	// Only need fileHandleMutex to modify activeHandles and close fileProxy
+	// Don't use fileMutex to avoid lock ordering issues (dataMutex -> fileMutex)
 	file.lockFileHandles()
 	defer file.unlockFileHandles()
 
@@ -143,12 +149,17 @@ func (file *FileINode) closeStaging() {
 
 // Responds to the FUSE Fsync request
 func (file *FileINode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
-	logger.Info(fmt.Sprintf("Dispatching fsync request to all open handles: %d", len(file.activeHandles)), logger.Fields{Operation: Fsync})
-	file.lockFile()
-	defer file.unlockFile()
+	// Take a snapshot of handles and release lock before dispatching
+	// This avoids deadlock when handle methods call upgradeHandleForWriting()
+	file.lockFileHandles()
+	handles := make([]*FileHandle, len(file.activeHandles))
+	copy(handles, file.activeHandles)
+	file.unlockFileHandles()
+
+	logger.Info(fmt.Sprintf("Dispatching fsync request to all open handles: %d", len(handles)), logger.Fields{Operation: Fsync})
 
 	var retErr error
-	for _, handle := range file.activeHandles {
+	for _, handle := range handles {
 		err := handle.Fsync(ctx, req)
 		if err != nil {
 			retErr = err
@@ -165,15 +176,19 @@ func (file *FileINode) InvalidateMetadataCache() {
 
 // Responds on FUSE Chmod request
 func (file *FileINode) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
-	file.lockFile()
-	defer file.unlockFile()
-
 	logger.Debug("Setattr request received: ", logger.Fields{Operation: Setattr})
 
 	if req.Valid.Size() {
+		// Take a snapshot of handles and release lock before dispatching
+		// This avoids deadlock when handle methods call upgradeHandleForWriting()
+		file.lockFileHandles()
+		handles := make([]*FileHandle, len(file.activeHandles))
+		copy(handles, file.activeHandles)
+		file.unlockFileHandles()
+
+		logger.Info(fmt.Sprintf("Dispatching truncate request to all open handles: %d", len(handles)), logger.Fields{Operation: Setattr})
 		var err_out error = nil
-		logger.Info(fmt.Sprintf("Dispatching truncate request to all open handles: %d", len(file.activeHandles)), logger.Fields{Operation: Setattr})
-		for _, handle := range file.activeHandles {
+		for _, handle := range handles {
 			err := handle.Truncate(int64(req.Size))
 			if err != nil {
 				err_out = err
@@ -183,6 +198,10 @@ func (file *FileINode) Setattr(ctx context.Context, req *fuse.SetattrRequest, re
 		}
 		return err_out
 	}
+
+	// For other setattr operations, use fileMutex to protect metadata
+	file.lockFile()
+	defer file.unlockFile()
 
 	path := file.AbsolutePath()
 
@@ -350,13 +369,8 @@ func (file *FileINode) upgradeHandleForWriting(me *FileHandle, operation string)
 
 		logger.Info(fmt.Sprintf("Upgrading file handle for writing. Active handles %d", len(file.activeHandles)), file.logInfo(logger.Fields{Operation: operation}))
 
-		//lock n unlock all handles
-		for _, h := range file.activeHandles {
-			if h != me {
-				h.lockHandle()
-				defer h.unlockHandle()
-			}
-		}
+		// No need to lock other handles - they're all blocked by the same dataMutex
+		// that the caller (Write/Truncate) already holds
 
 		remoteROFileProxy, _ := file.fileProxy.(*RemoteROFileProxy)
 		remoteROFileProxy.hdfsReader.Close() // close this read only handle

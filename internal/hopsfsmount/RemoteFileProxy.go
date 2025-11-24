@@ -17,23 +17,19 @@ type RemoteROFileProxy struct {
 var _ FileProxy = (*RemoteROFileProxy)(nil)
 
 func (p *RemoteROFileProxy) Truncate(size int64) (int64, error) {
-	p.file.lockFileHandles()
-	defer p.file.unlockFileHandles()
+	// No locking needed - caller holds dataMutex which serializes all I/O
 	logger.Fatal("Truncate API is not supported. Read only mode", nil)
 	return 0, nil
 }
 
 func (p *RemoteROFileProxy) WriteAt(b []byte, off int64) (n int, err error) {
-	p.file.lockFileHandles()
-	defer p.file.unlockFileHandles()
+	// No locking needed - caller holds dataMutex which serializes all I/O
 	logger.Fatal("WriteAt API is not supported. Read only mode", nil)
 	return 0, nil
 }
 
 func (p *RemoteROFileProxy) ReadAt(b []byte, off int64) (int, error) {
-	p.file.lockFileHandles()
-	defer p.file.unlockFileHandles()
-
+	// No locking needed - caller holds dataMutex which serializes all I/O
 	logger.Debug("RemoteFileProxy ReadAt", p.file.logInfo(logger.Fields{Operation: Read, Offset: off}))
 
 	if off < 0 {
@@ -74,9 +70,7 @@ func (p *RemoteROFileProxy) ReadAt(b []byte, off int64) (int, error) {
 }
 
 func (p *RemoteROFileProxy) SeekToStart() (err error) {
-	p.file.lockFileHandles()
-	defer p.file.unlockFileHandles()
-
+	// No locking needed - caller holds dataMutex which serializes all I/O
 	err = p.hdfsReader.Seek(0)
 	if err != nil {
 		logger.Debug("RemoteFileProxy SeekToStart failed", p.file.logInfo(logger.Fields{Operation: SeekToStart, Offset: 0, Error: err}))
@@ -89,8 +83,7 @@ func (p *RemoteROFileProxy) SeekToStart() (err error) {
 }
 
 func (p *RemoteROFileProxy) Read(b []byte) (n int, err error) {
-	p.file.lockFileHandles()
-	defer p.file.unlockFileHandles()
+	// No locking needed - caller holds dataMutex which serializes all I/O
 	n, err = p.hdfsReader.Read(b)
 
 	if err != nil {
@@ -103,7 +96,7 @@ func (p *RemoteROFileProxy) Read(b []byte) (n int, err error) {
 }
 
 func (p *RemoteROFileProxy) Close() error {
-	//NOTE: Locking is done in File.go
+	//NOTE: Locking is done in File.go (closeStaging and upgradeHandleForWriting hold fileHandleMutex)
 	err := p.hdfsReader.Close()
 	if err != nil {
 		logger.Debug("RemoteFileProxy Close failed", p.file.logInfo(logger.Fields{Operation: Close, Error: err}))
@@ -115,9 +108,7 @@ func (p *RemoteROFileProxy) Close() error {
 }
 
 func (p *RemoteROFileProxy) Sync() error {
-	p.file.lockFileHandles()
-	defer p.file.unlockFileHandles()
-
+	// No locking needed - caller holds dataMutex which serializes all I/O
 	logger.Fatal("Sync API is not supported. Read only mode", nil)
 	return nil
 }

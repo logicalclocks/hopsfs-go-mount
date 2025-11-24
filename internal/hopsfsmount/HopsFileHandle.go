@@ -255,9 +255,13 @@ func (fh *FileHandle) logInfo(fields logger.Fields) logger.Fields {
 }
 
 func (fh *FileHandle) lockHandle() {
-	fh.mutex.Lock()
+	// fh.mutex.Lock()
+	logger.Warn("Waiting for lock ", fh.logInfo(logger.Fields{Operation: Write}))
+	fh.File.dataMutex.Lock()
+	logger.Warn("Waited for lock ", fh.logInfo(logger.Fields{Operation: Write}))
 }
 
 func (fh *FileHandle) unlockHandle() {
-	fh.mutex.Unlock()
+	//fh.mutex.Unlock()
+	fh.File.dataMutex.Unlock()
 }

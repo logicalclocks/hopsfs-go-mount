@@ -18,9 +18,7 @@ type LocalRWFileProxy struct {
 var _ FileProxy = (*LocalRWFileProxy)(nil)
 
 func (p *LocalRWFileProxy) Truncate(size int64) (int64, error) {
-	p.file.lockFileHandles()
-	defer p.file.unlockFileHandles()
-
+	// No locking needed - caller holds dataMutex which serializes all I/O
 	statBefore, err := p.localFile.Stat()
 	if err != nil {
 		return 0, err
@@ -40,40 +38,35 @@ func (p *LocalRWFileProxy) Truncate(size int64) (int64, error) {
 }
 
 func (p *LocalRWFileProxy) WriteAt(b []byte, off int64) (n int, err error) {
-	p.file.lockFileHandles()
-	defer p.file.unlockFileHandles()
+	// No locking needed - caller holds dataMutex which serializes all I/O
 	return p.localFile.WriteAt(b, off)
 }
 
 func (p *LocalRWFileProxy) ReadAt(b []byte, off int64) (n int, err error) {
-	p.file.lockFileHandles()
-	defer p.file.unlockFileHandles()
+	// No locking needed - caller holds dataMutex which serializes all I/O
 	n, err = p.localFile.ReadAt(b, off)
 	logger.Debug("LocalFileProxy ReadAt", p.file.logInfo(logger.Fields{Operation: Read, Bytes: n, Error: err, Offset: off}))
 	return
 }
 
 func (p *LocalRWFileProxy) SeekToStart() (err error) {
-	p.file.lockFileHandles()
-	defer p.file.unlockFileHandles()
+	// No locking needed - caller holds dataMutex which serializes all I/O
 	_, err = p.localFile.Seek(0, 0)
 	return
 }
 
 func (p *LocalRWFileProxy) Read(b []byte) (n int, err error) {
-	p.file.lockFileHandles()
-	defer p.file.unlockFileHandles()
+	// No locking needed - caller holds dataMutex which serializes all I/O
 	return p.localFile.Read(b)
 }
 
 func (p *LocalRWFileProxy) Close() error {
-	//NOTE: Locking is done in File.go
+	//NOTE: Locking is done in File.go (closeStaging holds fileHandleMutex)
 	return p.localFile.Close()
 }
 
 // TODO why there is a sync in File.go and also here
 func (p *LocalRWFileProxy) Sync() error {
-	p.file.lockFileHandles()
-	defer p.file.unlockFileHandles()
+	// No locking needed - caller holds dataMutex which serializes all I/O
 	return p.localFile.Sync()
 }
