@@ -25,7 +25,7 @@ import (
 
 func TestReadWriteEmptyFile(t *testing.T) {
 
-	withMount(t, "/", func(mountPoint string, hdfsAccessor HdfsAccessor) {
+	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
 		//create a file, make sure that use and group information is correct
 		r := rand.New(rand.NewSource(time.Now().Local().Unix()))
 		for i := 0; i < 10; i++ {
@@ -50,7 +50,7 @@ func TestReadWriteEmptyFile(t *testing.T) {
 
 func TestSimple(t *testing.T) {
 
-	withMount(t, "/", func(mountPoint string, hdfsAccessor HdfsAccessor) {
+	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
 		for i := 0; i < 3; i++ {
 			testFile := filepath.Join(mountPoint, fmt.Sprintf("somefile_%d", i))
 			os.Remove(testFile)
@@ -65,7 +65,7 @@ func TestSimple(t *testing.T) {
 
 func TestRename1(t *testing.T) {
 
-	withMount(t, "/", func(mountPoint string, hdfsAccessor HdfsAccessor) {
+	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
 
 		// perform this N number of
 		//   1. rename file1 -> file2
@@ -125,7 +125,7 @@ func renameTestInt(t *testing.T, file1, file2 string) {
 
 func TestTruncate(t *testing.T) {
 
-	withMount(t, "/", func(mountPoint string, hdfsAccessor HdfsAccessor) {
+	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
 		//create a file, make sure that use and group information is correct
 		testFile := filepath.Join(mountPoint, "somefile")
 		os.Remove(testFile)
@@ -159,7 +159,7 @@ func TestTruncate(t *testing.T) {
 
 func TestTruncateGreaterLength(t *testing.T) {
 
-	withMount(t, "/", func(mountPoint string, hdfsAccessor HdfsAccessor) {
+	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
 		//create a file, make sure that use and group information is correct
 		testFile1 := filepath.Join(mountPoint, "somefile1")
 		os.Remove(testFile1)
@@ -217,7 +217,7 @@ func TestTruncateGreaterLength(t *testing.T) {
 // testing multiple read write clients perfile
 func TestMultipleRWCllients(t *testing.T) {
 
-	withMount(t, "/", func(mountPoint string, hdfsAccessor HdfsAccessor) {
+	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
 		//create a file, make sure that use and group information is correct
 		// mountPoint = "/tmp"
 		testFile1 := filepath.Join(mountPoint, "somefile")
@@ -262,7 +262,7 @@ func TestMountSubDir(t *testing.T) {
 	//mount and create some files and dirs
 	dirs := 5
 	filesPdir := 3
-	withMount(t, "/", func(mountPoint string, hdfsAccessor HdfsAccessor) {
+	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
 		//create some directories and files
 		for i := 0; i < dirs; i++ {
 			dir := filepath.Join(mountPoint, "dir"+strconv.Itoa(i))
@@ -282,7 +282,7 @@ func TestMountSubDir(t *testing.T) {
 	})
 
 	// remount only one dir
-	withMount(t, "/dir1", func(mountPoint string, hdfsAccessor HdfsAccessor) {
+	withMount(t, "/dir1", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
 		content := listDir(t, mountPoint)
 		if len(content) != filesPdir {
 			t.Errorf("Failed. Expected == %d, Got %d ", filesPdir, len(content))
@@ -293,7 +293,7 @@ func TestMountSubDir(t *testing.T) {
 	})
 
 	// remount every thing for cleanup
-	withMount(t, "/", func(mountPoint string, hdfsAccessor HdfsAccessor) {
+	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
 		//delete all the files and dirs created in this test
 		for i := 0; i < dirs; i++ {
 			dir := filepath.Join(mountPoint, "dir"+strconv.Itoa(i))
@@ -346,7 +346,6 @@ func seekTest(t *testing.T, dataSize int, diskSeekTestFile string, dfsSeekTestFi
 		t.Fatalf("Failed %v", err)
 	}
 	defer client.Close()
-	fmt.Printf("Connected to DFS\n")
 
 	prepare(t, client, dataSize, diskSeekTestFile, dfsSeekTestFile)
 
@@ -504,7 +503,7 @@ func testSeeks(t *testing.T, client *hdfs.Client, diskTestFile string, dfsTestFi
 func TestMultipleMountPoints(t *testing.T) {
 
 	//clean up old runs
-	withMount(t, "/", func(mountPoint string, hdfsAccessor HdfsAccessor) {
+	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
 		testFile := filepath.Join(mountPoint, "somefile")
 		rmFile(testFile)
 	})
@@ -546,13 +545,13 @@ func TestMultipleMountPoints(t *testing.T) {
 		return nil
 	}
 
-	go withMount(t, "/", func(mountPoint string, hdfsAccessor HdfsAccessor) {
+	go withMount(t, "/", false, func(mountPoint string, hdfsAccessor HdfsAccessor) {
 		testFile := filepath.Join(mountPoint, "somefile")
 		work(0, testFile)
 		wg.Done()
 	})
 
-	go withMount(t, "/", func(mountPoint string, hdfsAccessor HdfsAccessor) {
+	go withMount(t, "/", false, func(mountPoint string, hdfsAccessor HdfsAccessor) {
 		testFile := filepath.Join(mountPoint, "somefile")
 		work(1, testFile)
 		wg.Done()
@@ -561,7 +560,7 @@ func TestMultipleMountPoints(t *testing.T) {
 	wg.Wait()
 
 	// the file must exist
-	withMount(t, "/", func(mountPoint string, hdfsAccessor HdfsAccessor) {
+	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
 		testFile := filepath.Join(mountPoint, "somefile")
 		logger.Info("Checking and Cleaing up", logger.Fields{Path: testFile})
 
@@ -589,7 +588,7 @@ func TestMultipleMountPoints(t *testing.T) {
 	})
 }
 
-func withMount(t testing.TB, srcDir string, fn func(mntPath string, hdfsAccessor HdfsAccessor)) {
+func withMount(t testing.TB, srcDir string, delaySyncUntilClose bool, fn func(mntPath string, hdfsAccessor HdfsAccessor)) {
 	t.Helper()
 
 	// Wrapping with FaultTolerantHdfsAccessor
@@ -605,7 +604,7 @@ func withMount(t testing.TB, srcDir string, fn func(mntPath string, hdfsAccessor
 	ftHdfsAccessor := NewFaultTolerantHdfsAccessor(hdfsAccessor, retryPolicy)
 
 	// Creating the virtual file system
-	fileSystem, err := NewFileSystem([]HdfsAccessor{ftHdfsAccessor}, srcDir, []string{"*"}, false, retryPolicy, WallClock{})
+	fileSystem, err := NewFileSystem([]HdfsAccessor{ftHdfsAccessor}, srcDir, []string{"*"}, false, delaySyncUntilClose, retryPolicy, WallClock{})
 	if err != nil {
 		t.Fatalf(fmt.Sprintf("Error/NewFileSystem: %v ", err), nil)
 	}
@@ -749,4 +748,270 @@ func disablePolling(rootDir string) {
 		logger.Debug("File is ready for polling.", nil)
 	}
 
+}
+
+// TestConcurrentWritesWithFlush tests multiple goroutines writing to the same file
+// with fsync calls between writes. This tests:
+// 1. dataMutex properly serializes concurrent writes
+// 2. File-level isDirty flag prevents redundant flushes
+// 3. No data corruption with concurrent handles
+func TestConcurrentWritesWithFlush1(t *testing.T) {
+	testConcurrentWritesWithFlushInt(t, false)
+}
+func TestConcurrentWritesWithFlush2(t *testing.T) {
+	testConcurrentWritesWithFlushInt(t, true)
+}
+func testConcurrentWritesWithFlushInt(t *testing.T, delaySyncUntilClose bool) {
+	withMount(t, "/", delaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
+		// Create test directory
+		testDir := filepath.Join(mountPoint, "test-concurrent-writes")
+		os.RemoveAll(testDir) // Clean up from previous runs
+		mkdir(t, testDir)
+		defer os.RemoveAll(testDir)
+
+		testFile := filepath.Join(testDir, "concurrent_test.txt")
+
+		// Test parameters
+		numThreads := 3
+		bytesPerThread := 128 * 1024 * 1024 // 128MB per thread
+		chunkSize := 64 * 1024              // 64KB chunks
+		syncEveryMB := 30                   // Sync after every 10MB
+		useSync := true                     // true = Sync(), false = no sync
+		syncEveryBytes := syncEveryMB * 1024 * 1024
+		totalFileSize := int64(numThreads * bytesPerThread)
+
+		// Create file and truncate to total size
+		f, err := os.Create(testFile)
+		if err != nil {
+			t.Fatalf("Failed to create test file: %v", err)
+		}
+
+		// Truncate file to allocate space for all threads
+		err = f.Truncate(totalFileSize)
+		if err != nil {
+			t.Fatalf("Failed to truncate file: %v", err)
+		}
+		f.Close()
+
+		syncDescription := fmt.Sprintf("Sync every %d MB", syncEveryMB)
+		if !useSync {
+			syncDescription = "No periodic sync (flush on close only)"
+		}
+		logger.Info(fmt.Sprintf("Test config: %d threads, %d MB per thread, %d KB chunks, %s",
+			numThreads, bytesPerThread/(1024*1024), chunkSize/1024, syncDescription), nil)
+		logger.Info(fmt.Sprintf("Total file size: %d bytes (%.1f MB)",
+			totalFileSize, float64(totalFileSize)/1024/1024), nil)
+
+		var wg sync.WaitGroup
+		wg.Add(numThreads)
+
+		startBarrier := make(chan struct{})
+		errors := make(chan error, numThreads)
+		threadDurations := make(chan time.Duration, numThreads)
+
+		// Worker function - each thread writes to its own region
+		worker := func(threadID int) {
+			defer wg.Done()
+
+			// Calculate this thread's region in the file
+			threadOffset := int64(threadID * bytesPerThread)
+
+			// Open file for writing (each thread gets its own handle)
+			file, err := os.OpenFile(testFile, os.O_WRONLY, 0644)
+			if err != nil {
+				errors <- fmt.Errorf("Thread %d: failed to open file: %v", threadID, err)
+				return
+			}
+			defer file.Close()
+
+			// Wait for all threads to be ready
+			<-startBarrier
+
+			threadStartTime := time.Now()
+
+			// Prepare chunk filled with thread ID
+			chunk := make([]byte, chunkSize)
+			for i := 0; i < chunkSize; i++ {
+				chunk[i] = byte(threadID + '0') // Convert thread ID to ASCII digit
+			}
+
+			// Seek to thread's region
+			_, err = file.Seek(threadOffset, 0)
+			if err != nil {
+				errors <- fmt.Errorf("Thread %d: seek failed: %v", threadID, err)
+				return
+			}
+
+			// Write data in chunks with periodic syncs
+			bytesWritten := 0
+			bytesSinceLastSync := 0
+			syncCount := 0
+			numChunks := bytesPerThread / chunkSize
+
+			for chunkNum := 0; chunkNum < numChunks; chunkNum++ {
+				n, err := file.Write(chunk)
+				if err != nil {
+					errors <- fmt.Errorf("Thread %d: write failed at chunk %d: %v", threadID, chunkNum, err)
+					return
+				}
+				if n != chunkSize {
+					errors <- fmt.Errorf("Thread %d: incomplete write at chunk %d: %d/%d bytes", threadID, chunkNum, n, chunkSize)
+					return
+				}
+
+				bytesWritten += n
+				bytesSinceLastSync += n
+
+				// Sync after every syncEveryBytes (only if useSync is true)
+				if useSync && bytesSinceLastSync >= syncEveryBytes {
+					startOp := time.Now()
+					err = file.Sync()
+					opTime := time.Since(startOp)
+					if err != nil {
+						errors <- fmt.Errorf("Thread %d: Sync failed after %d MB: %v", threadID, bytesWritten/(1024*1024), err)
+						return
+					}
+					syncCount++
+					logger.Info(fmt.Sprintf("Thread %d: Sync after %d MB (#%d) in %v",
+						threadID, bytesWritten/(1024*1024), syncCount, opTime), nil)
+					bytesSinceLastSync = 0
+				}
+			}
+
+			// Final sync if useSync is true and there's unsynced data
+			if useSync && bytesSinceLastSync > 0 {
+				startOp := time.Now()
+				err = file.Sync()
+				opTime := time.Since(startOp)
+				if err != nil {
+					errors <- fmt.Errorf("Thread %d: final Sync failed: %v", threadID, err)
+					return
+				}
+				syncCount++
+				logger.Info(fmt.Sprintf("Thread %d: Final Sync (#%d) in %v", threadID, syncCount, opTime), nil)
+			}
+
+			threadDuration := time.Since(threadStartTime)
+			threadDurations <- threadDuration
+
+			operationType := "syncs"
+			if !useSync {
+				operationType = "no syncs (flush on close)"
+			}
+			logger.Info(fmt.Sprintf("Thread %d: Completed %d MB in %v (%.2f MB/s, %d %s)",
+				threadID, bytesWritten/(1024*1024), threadDuration,
+				float64(bytesWritten)/1024/1024/threadDuration.Seconds(), syncCount, operationType), nil)
+		}
+
+		// Start all worker threads
+		for i := 0; i < numThreads; i++ {
+			go worker(i)
+		}
+
+		// Signal all threads to start and measure total time
+		logger.Info("Starting concurrent writes...", nil)
+		testStartTime := time.Now()
+		close(startBarrier)
+
+		// Wait for all threads to complete
+		wg.Wait()
+		totalWallTime := time.Since(testStartTime)
+		close(errors)
+		close(threadDurations)
+
+		// Collect per-thread durations
+		var threadTimes []time.Duration
+		for duration := range threadDurations {
+			threadTimes = append(threadTimes, duration)
+		}
+
+		// Log timing summary
+		logger.Info("=== Timing Summary ===", nil)
+		logger.Info(fmt.Sprintf("Total wall time: %v (%.2f MB/s)",
+			totalWallTime, float64(totalFileSize)/1024/1024/totalWallTime.Seconds()), nil)
+		for i, duration := range threadTimes {
+			logger.Info(fmt.Sprintf("Thread %d time: %v", i, duration), nil)
+		}
+
+		// Check for errors
+		for err := range errors {
+			t.Error(err)
+		}
+		if t.Failed() {
+			return
+		}
+
+		// Verify file size
+		fileInfo, err := os.Stat(testFile)
+		if err != nil {
+			t.Fatalf("Failed to stat file: %v", err)
+		}
+		if fileInfo.Size() != totalFileSize {
+			t.Errorf("File size mismatch! Expected %d bytes, got %d bytes",
+				totalFileSize, fileInfo.Size())
+			return
+		}
+
+		logger.Info("=== Verifying file contents ===", nil)
+
+		// Read back and verify each thread's region
+		file, err := os.Open(testFile)
+		if err != nil {
+			t.Fatalf("Failed to open file for verification: %v", err)
+		}
+		defer file.Close()
+
+		// Read and verify each thread's region
+		verifyBuffer := make([]byte, chunkSize)
+		for threadID := 0; threadID < numThreads; threadID++ {
+			expectedByte := byte(threadID + '0')
+			threadOffset := int64(threadID * bytesPerThread)
+
+			// Seek to thread's region
+			_, err := file.Seek(threadOffset, 0)
+			if err != nil {
+				t.Fatalf("Thread %d region: seek failed: %v", threadID, err)
+			}
+
+			// Verify all bytes in this thread's region
+			bytesVerified := 0
+			errorCount := 0
+			numChunks := bytesPerThread / chunkSize
+
+			for chunkNum := 0; chunkNum < numChunks; chunkNum++ {
+				n, err := file.Read(verifyBuffer)
+				if err != nil {
+					t.Fatalf("Thread %d region: read failed at chunk %d: %v", threadID, chunkNum, err)
+				}
+				if n != chunkSize {
+					t.Errorf("Thread %d region: incomplete read at chunk %d: %d/%d bytes", threadID, chunkNum, n, chunkSize)
+					break
+				}
+
+				// Verify all bytes match thread ID
+				for i := 0; i < n; i++ {
+					if verifyBuffer[i] != expectedByte {
+						errorCount++
+						if errorCount <= 5 { // Only log first few errors
+							t.Errorf("Thread %d region: byte %d (global offset %d) has wrong value: expected '%c', got '%c'",
+								threadID, bytesVerified+i, threadOffset+int64(bytesVerified+i), expectedByte, verifyBuffer[i])
+						}
+					}
+				}
+
+				bytesVerified += n
+			}
+
+			if errorCount == 0 {
+				logger.Info(fmt.Sprintf("Thread %d region: verified %d MB correctly",
+					threadID, bytesVerified/(1024*1024)), nil)
+			} else {
+				t.Errorf("Thread %d region: found %d corrupted bytes out of %d", threadID, errorCount, bytesVerified)
+			}
+		}
+
+		if !t.Failed() {
+			logger.Info("=== Test completed successfully ===", nil)
+		}
+	})
 }

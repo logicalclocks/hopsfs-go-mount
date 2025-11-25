@@ -310,8 +310,7 @@ func (dir *DirINode) Create(ctx context.Context, req *fuse.CreateRequest, resp *
 		dir.removeChildInode(Create, req.Name)
 		return nil, nil, err
 	}
-
-	file.AddHandle(handle)
+	// Note: handle is already added to activeHandles inside NewFileHandle
 	err = ChownOp(dir.FileSystem, dir.AbsolutePathForChild(req.Name), userName, groupName)
 	if err != nil {
 		logger.Warn("Unable to change ownership of new file", logger.Fields{Operation: Create, Path: dir.AbsolutePathForChild(req.Name),

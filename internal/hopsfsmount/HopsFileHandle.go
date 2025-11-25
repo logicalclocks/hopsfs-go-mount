@@ -3,7 +3,6 @@
 package hopsfsmount
 
 import (
-	"fmt"
 	"io"
 	"sync"
 	"syscall"
@@ -41,9 +40,10 @@ func (fh *FileHandle) dataChanged() bool {
 	}
 }
 
+// Lock order: dataMutex (3) → fileHandleMutex (1) via upgradeHandleForWriting
 func (fh *FileHandle) Truncate(size int64) error {
-	fh.lockHandle()
-	defer fh.unlockHandle()
+	fh.File.lockData()
+	defer fh.File.unlockData()
 
 	// as an optimization the file is initially opened in readonly mode
 	fh.File.upgradeHandleForWriting(fh, Truncate)
@@ -56,21 +56,25 @@ func (fh *FileHandle) Truncate(size int64) error {
 
 	fh.totalBytesWritten += sizeChanged
 
+	// Mark file as dirty (protected by dataMutex we're holding)
+	fh.File.markDirty()
+
 	logger.Info("Truncated file", fh.logInfo(logger.Fields{Operation: Truncate, Bytes: size}))
 	return nil
 }
 
 // Returns attributes of the file associated with this handle
+// Delegates to File.Attr which handles its own locking (fileMutex → fileHandleMutex)
+// Note: No dataMutex here to avoid invalid lock order dataMutex (3) → fileMutex (2)
 func (fh *FileHandle) Attr(ctx context.Context, a *fuse.Attr) error {
-	fh.lockHandle()
-	defer fh.unlockHandle()
 	return fh.File.Attr(ctx, a)
 }
 
 // Responds to FUSE Read request
+// Lock order: dataMutex (3) alone
 func (fh *FileHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
-	fh.lockHandle()
-	defer fh.unlockHandle()
+	fh.File.lockData()
+	defer fh.File.unlockData()
 
 	buf := resp.Data[0:req.Size]
 	nr, err := fh.File.fileProxy.ReadAt(buf, req.Offset)
@@ -94,9 +98,10 @@ func (fh *FileHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fus
 }
 
 // Responds to FUSE Write request
+// Lock order: dataMutex (3) → fileHandleMutex (1) via upgradeHandleForWriting
 func (fh *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.WriteResponse) error {
-	fh.lockHandle()
-	defer fh.unlockHandle()
+	fh.File.lockData()
+	defer fh.File.unlockData()
 
 	// as an optimization the file is initially opened in readonly mode
 	fh.File.upgradeHandleForWriting(fh, Write)
@@ -107,138 +112,62 @@ func (fh *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *f
 	if err != nil {
 		logger.Error("Failed to write to staging file", fh.logInfo(logger.Fields{Operation: Write, Error: err}))
 		return err
-	} else {
-		logger.Debug("Write data to staging file", fh.logInfo(logger.Fields{Operation: Write, Bytes: nw, ReqOffset: req.Offset}))
-		return nil
-	}
-}
-
-func (fh *FileHandle) copyToDFS(operation string) error {
-	if fh.totalBytesWritten == 0 { // Nothing to do
-		return nil
-	}
-	defer fh.File.InvalidateMetadataCache()
-
-	logger.Debug("Uploading to DFS", fh.logInfo(logger.Fields{Operation: operation, Bytes: fh.totalBytesWritten}))
-
-	op := fh.File.FileSystem.RetryPolicy.StartOperation()
-	for {
-		err := fh.FlushAttempt(operation)
-		if err != io.EOF || IsSuccessOrNonRetriableError(err) || !op.ShouldRetry("Flush() %s", err) {
-			return err
-		}
-		// Reconnect and try again
-		fh.File.FileSystem.getDFSConnector().Close()
-		logger.Warn("Failed to copy file to DFS", fh.logInfo(logger.Fields{Operation: operation}))
-	}
-}
-
-func (fh *FileHandle) FlushAttempt(operation string) error {
-	hdfsAccessor := fh.File.FileSystem.getDFSConnector()
-	//delete the file and then rewrite.
-	//note we can not rely on the overwrite functionality of CreateFile API.
-	//For example if the file has permission set to 444 then we can not overwrite it
-	err := hdfsAccessor.Remove(fh.File.AbsolutePath())
-	if err != nil {
-		// may be this is a retry and the file has already been deleted
-		// log error and continue
-		logger.Warn("Unable to delete the file during flush.", fh.logInfo(logger.Fields{Operation: operation, Error: err}))
 	}
 
-	w, err := hdfsAccessor.CreateFile(fh.File.AbsolutePath(), fh.File.Attrs.Mode, true)
-	if err != nil {
-		logger.Error("Error creating file in DFS", fh.logInfo(logger.Fields{Operation: operation, Error: err}))
-		return err
-	}
+	// Mark file as dirty (protected by dataMutex we're holding)
+	fh.File.markDirty()
 
-	//open the file for reading and upload to DFS
-	err = fh.File.fileProxy.SeekToStart()
-	if err != nil {
-		logger.Error("Unable to seek to the begenning of the temp file", fh.logInfo(logger.Fields{Operation: operation, Error: err}))
-		return err
-	}
-
-	written := uint64(0)
-	for {
-		b := make([]byte, 65536)
-		nr, err := fh.File.fileProxy.Read(b)
-		if err != nil && err != io.EOF {
-			logger.Error("Failed to read from staging file", fh.logInfo(logger.Fields{Operation: operation, Error: err}))
-			return err
-		}
-
-		if nr > 0 {
-			b = b[:nr]
-			nw, err := w.Write(b)
-			if err != nil {
-				logger.Error("Failed to write to DFS", fh.logInfo(logger.Fields{Operation: operation, Error: err}))
-				w.Close()
-				return err
-			}
-
-			if nr != nw {
-				logger.Error(fmt.Sprintf("Incorrect bytes read/written. Bytes reads %d, %d", nr, nw),
-					fh.logInfo(logger.Fields{Operation: operation, Error: err}))
-				w.Close()
-				logger.Error(fmt.Sprintf("incorrect bytes read/written. Bytes reads %d, %d", nr, nw), logger.Fields{Path: fh.File.AbsolutePath()})
-				return syscall.EIO
-			}
-
-			written += uint64(nw)
-		}
-
-		if err != nil && err == io.EOF {
-			break
-		}
-	}
-
-	err = w.Close()
-	if err != nil {
-		logger.Error("Failed to close file in DFS", fh.logInfo(logger.Fields{Operation: operation, Error: err}))
-		return err
-	}
-	logger.Info("Uploaded to DFS", fh.logInfo(logger.Fields{Operation: operation, Bytes: written}))
-
-	fh.File.Attrs.Size = written
+	logger.Debug("Write data to staging file", fh.logInfo(logger.Fields{Operation: Write, Bytes: nw, ReqOffset: req.Offset}))
 	return nil
 }
 
-// Responds to the FUSE Flush request
+// Responds to the FUSE Flush request.
+// IMPORTANT: Data must be uploaded to DFS in Flush, not in Release (close).
+// The FUSE library handles each request in a separate goroutine, and the kernel
+// does not wait for Release to complete before returning from the close() syscall.
+// Only Flush is synchronous - the kernel waits for Flush to complete before
+// returning from close(). If we defer upload to Release, subsequent file operations
+// may start before the previous file's upload is complete.
+// Lock order: dataMutex (3) → fileHandleMutex (1) via flushToDFS
 func (fh *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
-	fh.lockHandle()
-	defer fh.unlockHandle()
-	if fh.dataChanged() {
-		logger.Info("Flush file", fh.logInfo(logger.Fields{Operation: Flush}))
-		return fh.copyToDFS(Flush)
-	} else {
-		logger.Info("Flush file. Ignoring requst as no data has changed", fh.logInfo(logger.Fields{Operation: Flush}))
-		return nil
-	}
+	fh.File.lockData()
+	defer fh.File.unlockData()
+	return fh.File.flushToDFS(Flush)
 }
 
 // Responds to the FUSE Fsync request
+// Lock order: dataMutex (3) → fileHandleMutex (1) via flushToDFS
 func (fh *FileHandle) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
-	fh.lockHandle()
-	defer fh.unlockHandle()
-	if fh.dataChanged() {
-		logger.Info("Fsync file", fh.logInfo(logger.Fields{Operation: Fsync}))
-		return fh.copyToDFS(Fsync)
-	} else {
+	// If delaySyncUntilClose is enabled, skip fsync until file close
+	if fh.File.FileSystem.DelaySyncUntilClose {
+		logger.Debug("Fsync deferred until close", fh.logInfo(logger.Fields{Operation: Fsync}))
 		return nil
 	}
+
+	fh.File.lockData()
+	defer fh.File.unlockData()
+	return fh.File.flushToDFS(Fsync)
 }
 
 // Closes the handle
+// Lock order: dataMutex (3) → fileHandleMutex (1) via flushToDFS and RemoveHandle
 func (fh *FileHandle) Release(_ context.Context, _ *fuse.ReleaseRequest) error {
-	fh.lockHandle()
-	defer fh.unlockHandle()
+	fh.File.lockData()
+	defer fh.File.unlockData()
+
+	// Flush any dirty data before closing
+	err := fh.File.flushToDFS(Close)
+	if err != nil {
+		logger.Error("Failed to flush data on close", fh.logInfo(logger.Fields{Operation: Close, Error: err}))
+		// Continue with close even if flush fails
+	}
 
 	//close the file handle if it is the last handle
 	fh.File.InvalidateMetadataCache()
 	fh.File.RemoveHandle(fh)
 
 	logger.Info("Closed file handle ", fh.logInfo(logger.Fields{Operation: Close, Flags: fh.fileFlags, TotalBytesRead: fh.tatalBytesRead, TotalBytesWritten: fh.totalBytesWritten}))
-	return nil
+	return err // Return flush error if any
 }
 
 func (fh *FileHandle) Poll(ctx context.Context, req *fuse.PollRequest, resp *fuse.PollResponse) error {
@@ -252,16 +181,4 @@ func (fh *FileHandle) logInfo(fields logger.Fields) logger.Fields {
 		f[k] = e
 	}
 	return f
-}
-
-func (fh *FileHandle) lockHandle() {
-	// fh.mutex.Lock()
-	logger.Warn("Waiting for lock ", fh.logInfo(logger.Fields{Operation: Write}))
-	fh.File.dataMutex.Lock()
-	logger.Warn("Waited for lock ", fh.logInfo(logger.Fields{Operation: Write}))
-}
-
-func (fh *FileHandle) unlockHandle() {
-	//fh.mutex.Unlock()
-	fh.File.dataMutex.Unlock()
 }

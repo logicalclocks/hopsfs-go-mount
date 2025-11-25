@@ -28,6 +28,7 @@ var ClientKey string = "/srv/hops/super_crypto/hdfs/hdfs_priv.pem"
 var LazyMount bool = false
 var AllowedPrefixesString string = "*"
 var ReadOnly bool = false
+var DelaySyncUntilClose bool = true
 var Tls bool = false
 var Connectors int
 var Version bool = false
@@ -51,6 +52,7 @@ func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	flag.DurationVar(&retryPolicy.MaxDelay, "retryMaxDelay", 60*time.Second, "maximum delay between retries")
 	flag.StringVar(&AllowedPrefixesString, "allowedPrefixes", "*", "Comma-separated list of allowed path prefixes on the remote file system, if specified the mount point will expose access to those prefixes only")
 	flag.BoolVar(&ReadOnly, "readOnly", false, "Enables mount with readonly")
+	flag.BoolVar(&DelaySyncUntilClose, "delaySyncUntilClose", true, "Delay sync/flush operations until file close (default: true)")
 	flag.StringVar(&LogLevel, "logLevel", "info", "logs to be printed. error, warn, info, debug, trace")
 	flag.StringVar(&StagingDir, "stageDir", "/tmp", "stage directory for writing files")
 	flag.BoolVar(&Tls, "tls", false, "Enables tls connections")

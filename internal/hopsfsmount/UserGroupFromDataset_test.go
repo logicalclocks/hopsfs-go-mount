@@ -6,7 +6,7 @@ import (
 )
 
 func TestGetGroupFromDatasetPath(t *testing.T) {
-	withMount(t, "/", func(mountPoint string, hdfsAccessor HdfsAccessor) {
+	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
 		expectedPath := "tets_project__Jupyter"
 		cases := []struct {
 			Name          string

@@ -22,16 +22,35 @@ import (
 	"hopsworks.ai/hopsfsmount/internal/hopsfsmount/logger"
 )
 
+// Lock weight ordering (must be followed to avoid deadlocks):
+//
+//   dataMutex       (weight 3) - serializes I/O operations (read/write/truncate/flush)
+//   fileMutex       (weight 2) - protects file metadata (Attrs) and serializes Open requests
+//   fileHandleMutex (weight 1) - protects activeHandles and fileProxy lifecycle
+//
+// Rule: A goroutine holding a lock can only acquire locks with LOWER weight.
+// Note: dataMutex and fileMutex are independent (never nested with each other).
+//
+// Valid lock acquisitions:
+//   - dataMutex (3) → fileHandleMutex (1)
+//   - fileMutex (2) → fileHandleMutex (1)
+//   - Any lock alone
+//
+// INVALID (will cause deadlock):
+//   - fileHandleMutex (1) → dataMutex (3)
+//   - fileHandleMutex (1) → fileMutex (2)
+//   - dataMutex (3) → fileMutex (2) or vice versa
 type FileINode struct {
 	FileSystem *FileSystem // pointer to the FieSystem which owns this file
 	Attrs      Attrs       // Cache of file attributes // TODO: implement TTL
 	Parent     *DirINode   // Pointer to the parent directory (allows computing fully-qualified paths on demand)
 
 	activeHandles   []*FileHandle // list of opened file handles
-	fileMutex       sync.Mutex    // mutex for file operation such as open, delete
+	fileMutex       sync.Mutex    // mutex for file metadata (Attrs)
 	fileProxy       FileProxy     // file proxy. Could be LocalRWFileProxy or RemoteFileProxy
-	fileHandleMutex sync.Mutex    // mutex for file handle
-	dataMutex       sync.Mutex    // mutex for file handle
+	fileHandleMutex sync.Mutex    // mutex for activeHandles slice and fileProxy lifecycle
+	dataMutex       sync.Mutex    // mutex for all I/O operations (read/write/truncate/flush) and isDirty flag
+	isDirty         bool          // tracks if file has unflushed writes (protected by dataMutex)
 }
 
 // Verify that *File implements necesary FUSE interfaces
@@ -47,7 +66,11 @@ func (file *FileINode) AbsolutePath() string {
 }
 
 // Responds to the FUSE file attribute request
+// Lock order: fileMutex (2) → fileHandleMutex (1)
 func (file *FileINode) Attr(ctx context.Context, a *fuse.Attr) error {
+	file.lockFile()
+	defer file.unlockFile()
+
 	// Check fileProxy under fileHandleMutex to avoid race with closeStaging()
 	file.lockFileHandles()
 	lrwfp, hasLocalProxy := file.fileProxy.(*LocalRWFileProxy)
@@ -59,20 +82,14 @@ func (file *FileINode) Attr(ctx context.Context, a *fuse.Attr) error {
 			logger.Warn("stat failed on staging file", logger.Fields{Operation: GetattrFile, Path: file.AbsolutePath(), Error: err})
 			return err
 		}
-		// update the local cache under fileMutex
-		file.lockFile()
+		// update the local cache (fileMutex already held)
 		file.Attrs.Size = uint64(fileInfo.Size())
 		file.Attrs.Mtime = fileInfo.ModTime()
-		err = file.Attrs.ConvertAttrToFuse(a)
-		file.unlockFile()
-		return err
+		return file.Attrs.ConvertAttrToFuse(a)
 	}
 	file.unlockFileHandles()
 
 	// No local proxy - use cache or fetch from backend
-	file.lockFile()
-	defer file.unlockFile()
-
 	if file.FileSystem.Clock.Now().After(file.Attrs.Expires) {
 		_, err := file.Parent.statInodeInHopsFS(GetattrFile, file.Attrs.Name, &file.Attrs)
 		if err != nil {
@@ -85,6 +102,7 @@ func (file *FileINode) Attr(ctx context.Context, a *fuse.Attr) error {
 }
 
 // Responds to the FUSE file open request (creates new file handle)
+// Lock order: fileMutex (2) → fileHandleMutex (1) via NewFileHandle
 func (file *FileINode) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (fs.Handle, error) {
 	file.lockFile()
 	defer file.unlockFile()
@@ -102,21 +120,14 @@ func (file *FileINode) Open(ctx context.Context, req *fuse.OpenRequest, resp *fu
 
 	resp.Handle = fuse.HandleID(handle.fhID)
 
-	file.AddHandle(handle)
+	// Note: handle is already added to activeHandles inside NewFileHandle
 	return handle, nil
 }
 
-// Registers an opened file handle
-func (file *FileINode) AddHandle(handle *FileHandle) {
-	file.lockFileHandles()
-	defer file.unlockFileHandles()
-	file.activeHandles = append(file.activeHandles, handle)
-}
-
 // Unregisters an opened file handle
+// Lock order: fileHandleMutex (1) alone
+// Called from Release which holds dataMutex (3), so order is: dataMutex (3) → fileHandleMutex (1)
 func (file *FileINode) RemoveHandle(handle *FileHandle) {
-	// Only need fileHandleMutex to modify activeHandles and close fileProxy
-	// Don't use fileMutex to avoid lock ordering issues (dataMutex -> fileMutex)
 	file.lockFileHandles()
 	defer file.unlockFileHandles()
 
@@ -136,6 +147,7 @@ func (file *FileINode) RemoveHandle(handle *FileHandle) {
 }
 
 // close staging file
+// Called with fileHandleMutex held by RemoveHandle()
 func (file *FileINode) closeStaging() {
 	if file.fileProxy != nil { // if not already closed
 		err := file.fileProxy.Close()
@@ -143,29 +155,143 @@ func (file *FileINode) closeStaging() {
 			logger.Error("Failed to close staging file", file.logInfo(logger.Fields{Operation: Close, Error: err}))
 		}
 		file.fileProxy = nil
+		// Note: Don't reset isDirty here - it's protected by dataMutex, not fileHandleMutex
+		// isDirty should only be cleared by successful flush (which holds dataMutex)
 		logger.Info("Staging file is closed", file.logInfo(logger.Fields{Operation: Close}))
 	}
 }
 
-// Responds to the FUSE Fsync request
-func (file *FileINode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
-	// Take a snapshot of handles and release lock before dispatching
-	// This avoids deadlock when handle methods call upgradeHandleForWriting()
+// Marks file as dirty (has unflushed writes)
+// Must be called with dataMutex held
+func (file *FileINode) markDirty() {
+	file.isDirty = true
+}
+
+// Flushes file to DFS if dirty
+// Lock order: dataMutex (3) held by caller → fileHandleMutex (1) via flushAttempt
+func (file *FileINode) flushToDFS(operation string) error {
+	// Check dirty flag (already protected by dataMutex held by caller)
+	if !file.isDirty {
+		logger.Info("Upload to DFS. Ignoring request as no data has changed", file.logInfo(logger.Fields{Operation: operation}))
+		return nil
+	}
+
+	logger.Debug("Uploading to DFS", file.logInfo(logger.Fields{Operation: operation}))
+	defer file.InvalidateMetadataCache()
+
+	op := file.FileSystem.RetryPolicy.StartOperation()
+	for {
+		err := file.flushAttempt(operation)
+		if err == io.EOF || IsSuccessOrNonRetriableError(err) || !op.ShouldRetry("Flush() %s", err) {
+			if err == nil {
+				// Clear dirty flag on success (protected by dataMutex)
+				file.isDirty = false
+			}
+			return err
+		}
+		// Reconnect and try again
+		file.FileSystem.getDFSConnector().Close()
+		logger.Warn("Failed to copy file to DFS", file.logInfo(logger.Fields{Operation: operation}))
+	}
+}
+
+// Single flush attempt to DFS
+// Lock order: dataMutex (3) held by caller → fileHandleMutex (1)
+func (file *FileINode) flushAttempt(operation string) error {
 	file.lockFileHandles()
-	handles := make([]*FileHandle, len(file.activeHandles))
-	copy(handles, file.activeHandles)
+	lrwfp, ok := file.fileProxy.(*LocalRWFileProxy)
+	if !ok {
+		file.unlockFileHandles()
+		// Not a local RW proxy, nothing to flush
+		return nil
+	}
 	file.unlockFileHandles()
 
-	logger.Info(fmt.Sprintf("Dispatching fsync request to all open handles: %d", len(handles)), logger.Fields{Operation: Fsync})
+	hdfsAccessor := file.FileSystem.getDFSConnector()
+	//delete the file and then rewrite.
+	//note we can not rely on the overwrite functionality of CreateFile API.
+	//For example if the file has permission set to 444 then we can not overwrite it
+	err := hdfsAccessor.Remove(file.AbsolutePath())
+	if err != nil {
+		// may be this is a retry and the file has already been deleted
+		// log error and continue
+		logger.Warn("Unable to delete the file during flush.", file.logInfo(logger.Fields{Operation: operation, Error: err}))
+	}
 
-	var retErr error
-	for _, handle := range handles {
-		err := handle.Fsync(ctx, req)
-		if err != nil {
-			retErr = err
+	w, err := hdfsAccessor.CreateFile(file.AbsolutePath(), file.Attrs.Mode, true)
+	if err != nil {
+		logger.Error("Error creating file in DFS", file.logInfo(logger.Fields{Operation: operation, Error: err}))
+		return err
+	}
+
+	//open the file for reading and upload to DFS
+	err = lrwfp.SeekToStart()
+	if err != nil {
+		logger.Error("Unable to seek to the beginning of the temp file", file.logInfo(logger.Fields{Operation: operation, Error: err}))
+		return err
+	}
+
+	uploadStartTime := time.Now()
+	written := uint64(0)
+	b := make([]byte, 65536) // Allocate buffer once and reuse
+	for {
+		nr, err := lrwfp.Read(b)
+		if err != nil && err != io.EOF {
+			logger.Error("Failed to read from staging file", file.logInfo(logger.Fields{Operation: operation, Error: err}))
+			return err
+		}
+
+		if nr > 0 {
+			nw, err := w.Write(b[:nr])
+			if err != nil {
+				logger.Error("Failed to write to DFS", file.logInfo(logger.Fields{Operation: operation, Error: err}))
+				w.Close()
+				return err
+			}
+
+			if nr != nw {
+				logger.Error(fmt.Sprintf("Incorrect bytes read/written. Bytes reads %d, %d", nr, nw),
+					file.logInfo(logger.Fields{Operation: operation, Error: err}))
+				w.Close()
+				return syscall.EIO
+			}
+
+			written += uint64(nw)
+		}
+
+		if err != nil && err == io.EOF {
+			break
 		}
 	}
-	return retErr
+
+	err = w.Close()
+	if err != nil {
+		logger.Error("Failed to close file in DFS", file.logInfo(logger.Fields{Operation: operation, Error: err}))
+		return err
+	}
+
+	uploadDuration := time.Since(uploadStartTime)
+	throughputMBps := float64(written) / 1024 / 1024 / uploadDuration.Seconds()
+	logger.Info(fmt.Sprintf("Uploaded to DFS in %v (%.2f MB/s)", uploadDuration, throughputMBps),
+		file.logInfo(logger.Fields{Operation: operation, Bytes: written}))
+
+	file.Attrs.Size = written
+	return nil
+}
+
+// Responds to the FUSE Fsync request
+// Lock order: dataMutex (3) → fileHandleMutex (1) via flushToDFS
+func (file *FileINode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
+	// If delaySyncUntilClose is enabled, skip fsync until file close
+	if file.FileSystem.DelaySyncUntilClose {
+		logger.Debug("Fsync deferred until close", file.logInfo(logger.Fields{Operation: Fsync}))
+		return nil
+	}
+
+	logger.Info("Fsync file", file.logInfo(logger.Fields{Operation: Fsync}))
+	file.lockData()
+	defer file.unlockData()
+	return file.flushToDFS(Fsync)
 }
 
 // Invalidates metadata cache, so next ls or stat gives up-to-date file attributes
@@ -175,6 +301,7 @@ func (file *FileINode) InvalidateMetadataCache() {
 }
 
 // Responds on FUSE Chmod request
+// Lock order: fileHandleMutex (1) alone for size change, fileMutex (2) alone for other attrs
 func (file *FileINode) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
 	logger.Debug("Setattr request received: ", logger.Fields{Operation: Setattr})
 
@@ -225,6 +352,7 @@ func (file *FileINode) Setattr(ctx context.Context, req *fuse.SetattrRequest, re
 }
 
 // Responds on FUSE request to forget inode
+// Lock order: fileMutex (2) alone
 func (file *FileINode) Forget() {
 	file.lockFile()
 	defer file.unlockFile()
@@ -234,9 +362,10 @@ func (file *FileINode) Forget() {
 	// file.Parent.removeChildInode(Forget, file.Attrs.Name)
 }
 
+// Lock order: fileHandleMutex (1) alone
 func (file *FileINode) countActiveHandles() int {
 	file.lockFileHandles()
-	file.unlockFileHandles()
+	defer file.unlockFileHandles()
 	return len(file.activeHandles)
 }
 
@@ -303,6 +432,8 @@ func (file *FileINode) downloadToStaging(stagingFile *os.File, operation string)
 }
 
 // Creates new file handle
+// Lock order: fileHandleMutex (1) alone
+// Called from Open which holds fileMutex (2), so order is: fileMutex (2) → fileHandleMutex (1)
 func (file *FileINode) NewFileHandle(existsInDFS bool, flags fuse.OpenFlags) (*FileHandle, error) {
 	file.lockFileHandles()
 	defer file.unlockFileHandles()
@@ -346,10 +477,18 @@ func (file *FileINode) NewFileHandle(existsInDFS bool, flags fuse.OpenFlags) (*F
 		}
 	}
 
+	// Add handle to activeHandles while still holding fileHandleMutex to prevent race condition.
+	// Without this, there's a window between NewFileHandle returning and AddHandle being called
+	// where another handle's Release could call closeStaging() (setting fileProxy=nil) because
+	// activeHandles appears empty.
+	file.activeHandles = append(file.activeHandles, fh)
+
 	return fh, nil
 }
 
 // changes RO file handle to RW
+// Lock order: fileHandleMutex (1) alone
+// Called from Write/Truncate which hold dataMutex (3), so order is: dataMutex (3) → fileHandleMutex (1)
 func (file *FileINode) upgradeHandleForWriting(me *FileHandle, operation string) error {
 	file.lockFileHandles()
 	defer file.unlockFileHandles()
@@ -429,4 +568,12 @@ func (file *FileINode) lockFile() {
 
 func (file *FileINode) unlockFile() {
 	file.fileMutex.Unlock()
+}
+
+func (file *FileINode) lockData() {
+	file.dataMutex.Lock()
+}
+
+func (file *FileINode) unlockData() {
+	file.dataMutex.Unlock()
 }

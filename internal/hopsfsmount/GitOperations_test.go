@@ -20,7 +20,7 @@ import (
 )
 
 func TestGitClone(t *testing.T) {
-	withMount(t, "/", func(mountPoint string, hdfsAccessor HdfsAccessor) {
+	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
 
 		cloneDir := "cloneDir"
 		fullPath := filepath.Join(mountPoint, cloneDir)
@@ -29,7 +29,7 @@ func TestGitClone(t *testing.T) {
 }
 
 func TestGitCloneMT(t *testing.T) {
-	withMount(t, "/", func(mountPoint string, hdfsAccessor HdfsAccessor) {
+	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
 		clonePath1 := filepath.Join(mountPoint, "cloneDir1")
 		clonePath2 := filepath.Join(mountPoint, "cloneDir2")
 
@@ -68,7 +68,7 @@ func cloneTestInternal(t *testing.T, clonePath string, wg *sync.WaitGroup) {
 }
 
 func TestGit2(t *testing.T) {
-	withMount(t, "/", func(mountPoint string, hdfsAccessor HdfsAccessor) {
+	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
 
 		// mountPoint := "/tmp/mnt"
 		// repoName := "kube-hops-chef.git"
