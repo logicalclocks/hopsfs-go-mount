@@ -341,6 +341,10 @@ func (dir *DirINode) Remove(ctx context.Context, req *fuse.RemoveRequest) error 
 	err := dir.FileSystem.getDFSConnector().Remove(path)
 	if err == nil {
 		dir.removeChildInode(Remove, req.Name)
+		// Invalidate staging file cache for the removed path
+		if StagingFileCache != nil {
+			StagingFileCache.Remove(path)
+		}
 		logger.Info("Removed path", logger.Fields{Operation: Remove, Path: path})
 	} else {
 		logger.Warn("Failed to remove path", logger.Fields{Operation: Remove, Path: path, Error: err})
@@ -377,6 +381,11 @@ func (srcParent *DirINode) renameInt(operationName, oldName, newName string, dst
 	if err != nil {
 		logger.Error("Rename failed at the backend", logger.Fields{Operation: operationName, From: oldPath, To: newPath, Error: err})
 		return err
+	}
+
+	// Transfer staging file cache entry from old path to new path if it exists
+	if StagingFileCache != nil {
+		StagingFileCache.Rename(oldPath, newPath)
 	}
 
 	// disconnect src inode
