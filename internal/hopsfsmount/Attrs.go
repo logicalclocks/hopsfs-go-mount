@@ -38,6 +38,9 @@ func (attrs *Attrs) ConvertAttrToFuse(a *fuse.Attr) error {
 	a.Mode = attrs.Mode
 	if (a.Mode & os.ModeDir) == 0 {
 		a.Size = attrs.Size
+		// Set Blocks for du/stat to work correctly.
+		// Per POSIX, st_blocks is always in 512-byte units regardless of filesystem block size.
+		a.Blocks = (attrs.Size + 511) / 512
 	}
 	a.Uid = attrs.Uid
 	a.Gid = attrs.Gid

@@ -12,14 +12,14 @@ import (
 )
 
 func TestIsPathAllowedForStarPrefix(t *testing.T) {
-	fs, _ := NewFileSystem(nil, "/", []string{"*"}, false, NewDefaultRetryPolicy(WallClock{}), WallClock{})
+	fs, _ := NewFileSystem(nil, "/", []string{"*"}, false, DelaySyncUntilClose, NewDefaultRetryPolicy(WallClock{}), WallClock{})
 	assert.True(t, fs.IsPathAllowed("/"))
 	assert.True(t, fs.IsPathAllowed("/foo"))
 	assert.True(t, fs.IsPathAllowed("/foo/bar"))
 }
 
 func TestIsPathAllowedForMiscPrefixes(t *testing.T) {
-	fs, _ := NewFileSystem(nil, "/", []string{"foo", "bar", "baz/qux"}, false, NewDefaultRetryPolicy(WallClock{}), WallClock{})
+	fs, _ := NewFileSystem(nil, "/", []string{"foo", "bar", "baz/qux"}, false, DelaySyncUntilClose, NewDefaultRetryPolicy(WallClock{}), WallClock{})
 	assert.True(t, fs.IsPathAllowed("/"))
 	assert.True(t, fs.IsPathAllowed("/foo"))
 	assert.True(t, fs.IsPathAllowed("/bar"))
@@ -34,7 +34,7 @@ func TestStatfs(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	mockClock := &MockClock{}
 	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
-	fs, _ := NewFileSystem([]HdfsAccessor{hdfsAccessor}, "/", []string{"*"}, false, NewDefaultRetryPolicy(mockClock), mockClock)
+	fs, _ := NewFileSystem([]HdfsAccessor{hdfsAccessor}, "/", []string{"*"}, false, DelaySyncUntilClose, NewDefaultRetryPolicy(mockClock), mockClock)
 
 	hdfsAccessor.EXPECT().StatFs().Return(FsInfo{capacity: uint64(10240), remaining: uint64(1024)}, nil)
 	fsInfo := &fuse.StatfsResponse{}

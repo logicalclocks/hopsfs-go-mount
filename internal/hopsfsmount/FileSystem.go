@@ -22,15 +22,16 @@ import (
 )
 
 type FileSystem struct {
-	HdfsAccessors      []HdfsAccessor // Interface to access HDFS
-	hdfsAccessorsIndex int
-	SrcDir             string       // Src directory that will mounted
-	AllowedPrefixes    []string     // List of allowed path prefixes (only those prefixes are exposed via mountpoint)
-	ReadOnly           bool         // Indicates whether mount filesystem with readonly
-	Mounted            bool         // True if filesystem is mounted
-	RetryPolicy        *RetryPolicy // Retry policy
-	Clock              Clock        // interface to get wall clock time
-	FsInfo             FsInfo       // Usage of HDFS, including capacity, remaining, used sizes.
+	HdfsAccessors       []HdfsAccessor // Interface to access HDFS
+	hdfsAccessorsIndex  int
+	SrcDir              string       // Src directory that will mounted
+	AllowedPrefixes     []string     // List of allowed path prefixes (only those prefixes are exposed via mountpoint)
+	ReadOnly            bool         // Indicates whether mount filesystem with readonly
+	DelaySyncUntilClose bool         // If true, ignore sync/flush operations until file close
+	Mounted             bool         // True if filesystem is mounted
+	RetryPolicy         *RetryPolicy // Retry policy
+	Clock               Clock        // interface to get wall clock time
+	FsInfo              FsInfo       // Usage of HDFS, including capacity, remaining, used sizes.
 
 	closeOnUnmount     []io.Closer // list of opened files (zip archives) to be closed on unmount
 	closeOnUnmountLock sync.Mutex  // mutex to protet closeOnUnmount
@@ -41,15 +42,16 @@ var _ fs.FS = (*FileSystem)(nil)
 var _ fs.FSStatfser = (*FileSystem)(nil)
 
 // Creates an instance of mountable file system
-func NewFileSystem(hdfsAccessors []HdfsAccessor, srcDir string, allowedPrefixes []string, readOnly bool, retryPolicy *RetryPolicy, clock Clock) (*FileSystem, error) {
+func NewFileSystem(hdfsAccessors []HdfsAccessor, srcDir string, allowedPrefixes []string, readOnly bool, delaySyncUntilClose bool, retryPolicy *RetryPolicy, clock Clock) (*FileSystem, error) {
 	return &FileSystem{
-		HdfsAccessors:   hdfsAccessors,
-		Mounted:         false,
-		AllowedPrefixes: allowedPrefixes,
-		ReadOnly:        readOnly,
-		RetryPolicy:     retryPolicy,
-		Clock:           clock,
-		SrcDir:          srcDir}, nil
+		HdfsAccessors:       hdfsAccessors,
+		Mounted:             false,
+		AllowedPrefixes:     allowedPrefixes,
+		ReadOnly:            readOnly,
+		DelaySyncUntilClose: delaySyncUntilClose,
+		RetryPolicy:         retryPolicy,
+		Clock:               clock,
+		SrcDir:              srcDir}, nil
 }
 
 // Mounts the filesystem

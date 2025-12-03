@@ -63,7 +63,7 @@ func main() {
 	}
 
 	// Creating the virtual file system
-	fileSystem, err := hopsfsmount.NewFileSystem(ftHdfsAccessors, hopsfsmount.MntSrcDir, allowedPrefixes, hopsfsmount.ReadOnly, retryPolicy, hopsfsmount.WallClock{})
+	fileSystem, err := hopsfsmount.NewFileSystem(ftHdfsAccessors, hopsfsmount.MntSrcDir, allowedPrefixes, hopsfsmount.ReadOnly, hopsfsmount.DelaySyncUntilClose, retryPolicy, hopsfsmount.WallClock{})
 	if err != nil {
 		logger.Fatal(fmt.Sprintf("Error/NewFileSystem: %v ", err), nil)
 	}
