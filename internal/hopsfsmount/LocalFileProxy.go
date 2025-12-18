@@ -45,7 +45,7 @@ func (p *LocalRWFileProxy) WriteAt(b []byte, off int64) (n int, err error) {
 func (p *LocalRWFileProxy) ReadAt(b []byte, off int64) (n int, err error) {
 	// No locking needed - caller holds dataMutex which serializes all I/O
 	n, err = p.localFile.ReadAt(b, off)
-	logger.Debug("LocalFileProxy ReadAt", p.file.logInfo(logger.Fields{Operation: Read, Bytes: n, Error: err, Offset: off}))
+	logger.Trace("LocalFileProxy ReadAt", p.file.logInfo(logger.Fields{Operation: Read, Bytes: n, Error: err, Offset: off}))
 	return
 }
 

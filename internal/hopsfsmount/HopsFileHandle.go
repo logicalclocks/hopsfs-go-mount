@@ -46,7 +46,10 @@ func (fh *FileHandle) Truncate(size int64) error {
 	defer fh.File.unlockData()
 
 	// as an optimization the file is initially opened in readonly mode
-	fh.File.upgradeHandleForWriting(fh, Truncate)
+	err := fh.File.upgradeHandleForWriting(fh, Truncate)
+	if err != nil {
+		return err
+	}
 
 	sizeChanged, err := fh.File.fileProxy.Truncate(size)
 	if err != nil {
@@ -117,7 +120,7 @@ func (fh *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *f
 	// Mark file as dirty (protected by dataMutex we're holding)
 	fh.File.markDirty()
 
-	logger.Debug("Write data to staging file", fh.logInfo(logger.Fields{Operation: Write, Bytes: nw, ReqOffset: req.Offset}))
+	logger.Trace("Write data to staging file", fh.logInfo(logger.Fields{Operation: Write, Bytes: nw, ReqOffset: req.Offset}))
 	return nil
 }
 

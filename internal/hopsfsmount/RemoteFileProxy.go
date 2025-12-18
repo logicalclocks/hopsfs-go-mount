@@ -30,7 +30,7 @@ func (p *RemoteROFileProxy) WriteAt(b []byte, off int64) (n int, err error) {
 
 func (p *RemoteROFileProxy) ReadAt(b []byte, off int64) (int, error) {
 	// No locking needed - caller holds dataMutex which serializes all I/O
-	logger.Debug("RemoteFileProxy ReadAt", p.file.logInfo(logger.Fields{Operation: Read, Offset: off}))
+	logger.Trace("RemoteFileProxy ReadAt", p.file.logInfo(logger.Fields{Operation: Read, Offset: off}))
 
 	if off < 0 {
 		logger.Error("WriteAt. Negative offset", logger.Fields{Path: p.file.AbsolutePath()})
@@ -60,11 +60,11 @@ func (p *RemoteROFileProxy) ReadAt(b []byte, off int64) (int, error) {
 
 	if err != nil && err == io.EOF && n > 0 {
 		// no need to throw io.EOF
-		logger.Debug("RemoteFileProxy Finished reading", nil)
+		logger.Trace("RemoteFileProxy Finished reading", nil)
 		err = nil
 	}
 
-	logger.Debug("RemoteFileProxy ReadAt", p.file.logInfo(logger.Fields{Operation: Read, MaxBytesToRead: maxBytesToRead,
+	logger.Trace("RemoteFileProxy ReadAt", p.file.logInfo(logger.Fields{Operation: Read, MaxBytesToRead: maxBytesToRead,
 		BytesRead: n, Error: err, Offset: off}))
 	return n, err
 }
@@ -87,10 +87,10 @@ func (p *RemoteROFileProxy) Read(b []byte) (n int, err error) {
 	n, err = p.hdfsReader.Read(b)
 
 	if err != nil {
-		logger.Debug("RemoteFileProxy Read", p.file.logInfo(logger.Fields{Operation: Read, MaxBytesToRead: len(b), Error: err}))
+		logger.Trace("RemoteFileProxy Read", p.file.logInfo(logger.Fields{Operation: Read, MaxBytesToRead: len(b), Error: err}))
 		return n, err
 	} else {
-		logger.Debug("RemoteFileProxy Read", p.file.logInfo(logger.Fields{Operation: Read, MaxBytesToRead: len(b), TotalBytesRead: n}))
+		logger.Trace("RemoteFileProxy Read", p.file.logInfo(logger.Fields{Operation: Read, MaxBytesToRead: len(b), TotalBytesRead: n}))
 		return n, nil
 	}
 }
