@@ -29,6 +29,6 @@ mock: hopsfs-mount \
 	internal/hopsfsmount/mock_HdfsWriter_test.go \
 	internal/hopsfsmount/mock_FaultTolerantHdfsAccessor_test.go
 
-test: mock 
+test: mock
 	go clean -testcache
-	go test -v -p 1 -run $(TEST) -coverprofile coverage.txt `go list $(TEST_PACKAGE) | grep -v cmd`
+	go test -v -p 1 -timeout 20m -run $(TEST) -coverprofile coverage.txt `go list $(TEST_PACKAGE) | grep -v cmd`

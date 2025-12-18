@@ -24,9 +24,9 @@ import (
 
 // Lock weight ordering (must be followed to avoid deadlocks):
 //
-//   dataMutex       (weight 3) - serializes I/O operations (read/write/truncate/flush)
-//   fileMutex       (weight 2) - protects file metadata (Attrs) and serializes Open requests
-//   fileHandleMutex (weight 1) - protects activeHandles and fileProxy lifecycle
+//	dataMutex       (weight 3) - serializes I/O operations (read/write/truncate/flush)
+//	fileMutex       (weight 2) - protects file metadata (Attrs) and serializes Open requests
+//	fileHandleMutex (weight 1) - protects activeHandles and fileProxy lifecycle
 //
 // Rule: A goroutine holding a lock can only acquire locks with LOWER weight.
 // Note: dataMutex and fileMutex are independent (never nested with each other).
@@ -110,6 +110,7 @@ func (file *FileINode) Open(ctx context.Context, req *fuse.OpenRequest, resp *fu
 	logger.Debug("Opening file", logger.Fields{Operation: Open, Path: file.AbsolutePath(), Flags: req.Flags, FileSize: file.Attrs.Size})
 	handle, err := file.NewFileHandle(true, req.Flags)
 	if err != nil {
+		logger.Error("Opening file failed", logger.Fields{Operation: Open, Path: file.AbsolutePath(), Flags: req.Flags, FileSize: file.Attrs.Size, Error: err})
 		return nil, err
 	}
 
@@ -181,7 +182,9 @@ func (file *FileINode) flushToDFS(operation string) error {
 
 	op := file.FileSystem.RetryPolicy.StartOperation()
 	for {
+		logger.Debug("Flush Attempt", file.logInfo(logger.Fields{Operation: operation}))
 		err := file.flushAttempt(operation)
+		logger.Debug("Flush Attempt completed", file.logInfo(logger.Fields{Operation: operation}))
 		if err == io.EOF || IsSuccessOrNonRetriableError(err) || !op.ShouldRetry("Flush() %s", err) {
 			if err == nil {
 				// Clear dirty flag on success (protected by dataMutex)
@@ -244,8 +247,11 @@ func (file *FileINode) flushAttempt(operation string) error {
 		if nr > 0 {
 			nw, err := w.Write(b[:nr])
 			if err != nil {
-				logger.Error("Failed to write to DFS", file.logInfo(logger.Fields{Operation: operation, Error: err}))
-				w.Close()
+				logger.Error("Failed to write to DFS.", file.logInfo(logger.Fields{Operation: operation, Error: err}))
+				closeErr := w.Close()
+				if closeErr != nil {
+					logger.Error("Failed to write to DFS. Close failed", file.logInfo(logger.Fields{Operation: operation, Error: closeErr}))
+				}
 				return err
 			}
 

@@ -4,13 +4,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"golang.org/x/sys/unix"
 	"log"
 	"os"
 	"os/user"
 	"regexp"
 	"strconv"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"bazil.org/fuse"
 	"hopsworks.ai/hopsfsmount/internal/hopsfsmount/logger"

@@ -46,7 +46,10 @@ func (fh *FileHandle) Truncate(size int64) error {
 	defer fh.File.unlockData()
 
 	// as an optimization the file is initially opened in readonly mode
-	fh.File.upgradeHandleForWriting(fh, Truncate)
+	err := fh.File.upgradeHandleForWriting(fh, Truncate)
+	if err != nil {
+		return err
+	}
 
 	sizeChanged, err := fh.File.fileProxy.Truncate(size)
 	if err != nil {
@@ -117,7 +120,7 @@ func (fh *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *f
 	// Mark file as dirty (protected by dataMutex we're holding)
 	fh.File.markDirty()
 
-	logger.Debug("Write data to staging file", fh.logInfo(logger.Fields{Operation: Write, Bytes: nw, ReqOffset: req.Offset}))
+	logger.Trace("Write data to staging file", fh.logInfo(logger.Fields{Operation: Write, Bytes: nw, ReqOffset: req.Offset}))
 	return nil
 }
 
@@ -150,24 +153,22 @@ func (fh *FileHandle) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
 }
 
 // Closes the handle
-// Lock order: dataMutex (3) → fileHandleMutex (1) via flushToDFS and RemoveHandle
+// NOTE: Do NOT call flushToDFS here! Data must be uploaded in Flush(), not Release().
+// Release() is asynchronous - the kernel does NOT wait for it to complete before
+// returning from close(). Only Flush() is synchronous and guarantees data is uploaded
+// before the close() syscall returns. Calling flushToDFS here would mean retries could
+// happen after close() returns, breaking application expectations.
+// Lock order: dataMutex (3) → fileHandleMutex (1) via RemoveHandle
 func (fh *FileHandle) Release(_ context.Context, _ *fuse.ReleaseRequest) error {
 	fh.File.lockData()
 	defer fh.File.unlockData()
-
-	// Flush any dirty data before closing
-	err := fh.File.flushToDFS(Close)
-	if err != nil {
-		logger.Error("Failed to flush data on close", fh.logInfo(logger.Fields{Operation: Close, Error: err}))
-		// Continue with close even if flush fails
-	}
 
 	//close the file handle if it is the last handle
 	fh.File.InvalidateMetadataCache()
 	fh.File.RemoveHandle(fh)
 
 	logger.Info("Closed file handle ", fh.logInfo(logger.Fields{Operation: Close, Flags: fh.fileFlags, TotalBytesRead: fh.tatalBytesRead, TotalBytesWritten: fh.totalBytesWritten}))
-	return err // Return flush error if any
+	return nil
 }
 
 func (fh *FileHandle) Poll(ctx context.Context, req *fuse.PollRequest, resp *fuse.PollResponse) error {

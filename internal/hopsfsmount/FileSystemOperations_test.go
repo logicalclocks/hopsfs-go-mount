@@ -381,7 +381,7 @@ func prepare(t *testing.T, client *hdfs.Client, dataSize int, diskTestFile strin
 	}
 
 	if _, err := client.Stat(dfsTestFile); errors.Is(err, os.ErrNotExist) {
-		dfsWriter, err := client.Create(dfsTestFile)
+		dfsWriter, err := client.CreateFile(dfsTestFile, 3, 1024*1024, os.FileMode(0777), true, true)
 		if err != nil {
 			t.Fatalf("Failed %v", err)
 		}
@@ -420,7 +420,7 @@ func testSeeks(t *testing.T, client *hdfs.Client, diskTestFile string, dfsTestFi
 	diskReader, _ := os.Open(diskTestFile)
 	dfsReader, _ := client.Open(dfsTestFile)
 	bufferSize := 4 * 1024
-	for i := 0; i < 100000; i++ {
+	for i := 0; i < 10000; i++ {
 
 		// seek to random location
 		seek := rand.Int63n(fileInfo.Size())

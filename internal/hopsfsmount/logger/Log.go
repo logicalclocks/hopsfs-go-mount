@@ -15,7 +15,7 @@ import (
 
 var ReportCaller = true
 
-func Init() {
+func init() {
 	InitLogger("info", false, "")
 }
 
