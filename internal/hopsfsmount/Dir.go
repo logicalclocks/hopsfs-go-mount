@@ -342,8 +342,8 @@ func (dir *DirINode) Remove(ctx context.Context, req *fuse.RemoveRequest) error 
 	if err == nil {
 		dir.removeChildInode(Remove, req.Name)
 		// Invalidate staging file cache for the removed path
-		if StagingFileCache != nil {
-			StagingFileCache.Remove(path)
+		if StagingCache != nil {
+			StagingCache.Remove(path)
 		}
 		logger.Info("Removed path", logger.Fields{Operation: Remove, Path: path})
 	} else {
@@ -384,8 +384,8 @@ func (srcParent *DirINode) renameInt(operationName, oldName, newName string, dst
 	}
 
 	// Transfer staging file cache entry from old path to new path if it exists
-	if StagingFileCache != nil {
-		StagingFileCache.Rename(oldPath, newPath)
+	if StagingCache != nil {
+		StagingCache.Rename(oldPath, newPath)
 	}
 
 	// disconnect src inode

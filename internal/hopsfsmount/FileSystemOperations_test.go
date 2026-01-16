@@ -591,6 +591,18 @@ func TestMultipleMountPoints(t *testing.T) {
 func withMount(t testing.TB, srcDir string, delaySyncUntilClose bool, fn func(mntPath string, hdfsAccessor HdfsAccessor)) {
 	t.Helper()
 
+	// Enable cache for this test
+	if StagingCache == nil {
+		StagingCacheMaxDiskUsage = 0.9
+		StagingCache = NewStagingFileCache(10240)
+		t.Cleanup(func() {
+			if StagingCache != nil {
+				StagingCache.Clear()
+				StagingCache = nil
+			}
+		})
+	}
+
 	// Wrapping with FaultTolerantHdfsAccessor
 	retryPolicy := NewDefaultRetryPolicy(WallClock{})
 	retryPolicy.MaxAttempts = 1 // for quick failure

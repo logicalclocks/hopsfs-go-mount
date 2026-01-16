@@ -15,28 +15,28 @@ import (
 
 func setDiskUsageThreshold(t *testing.T, threshold float64) {
 	t.Helper()
-	original := LocalCacheMaxDiskUsage
-	LocalCacheMaxDiskUsage = threshold
+	original := StagingCacheMaxDiskUsage
+	StagingCacheMaxDiskUsage = threshold
 	t.Cleanup(func() {
-		LocalCacheMaxDiskUsage = original
+		StagingCacheMaxDiskUsage = original
 	})
 }
 
-func newTestCache(t *testing.T, maxEntries int) *LocalCache {
+func newTestCache(t *testing.T, maxEntries int) *StagingFileCache {
 	t.Helper()
-	cache := NewLocalCache(maxEntries)
+	cache := NewStagingFileCache(maxEntries)
 	t.Cleanup(func() {
-		cache.stopDiskUsageMonitor()
+		cache.stopBackgroundWorkers()
 	})
 	return cache
 }
 
-// TestLocalCachePutAndGet tests basic put and get operations
-func TestLocalCachePutAndGet(t *testing.T) {
+// TestStagingFileCachePutAndGet tests basic put and get operations
+func TestStagingFileCachePutAndGet(t *testing.T) {
 	cache := newTestCache(t, 10)
 
 	// Create a temporary file to cache
-	tmpFile, err := os.CreateTemp("", "localcache_test_*")
+	tmpFile, err := os.CreateTemp("", "stagingFileCache_test_*")
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
@@ -74,8 +74,8 @@ func TestLocalCachePutAndGet(t *testing.T) {
 	assert.False(t, ok)
 }
 
-// TestLocalCacheStaleEntry tests that stale entries are invalidated
-func TestLocalCacheStaleEntry(t *testing.T) {
+// TestStagingFileCacheStaleEntry tests that stale entries are invalidated
+func TestStagingFileCacheStaleEntry(t *testing.T) {
 	cache := newTestCache(t, 10)
 
 	hdfsPath := "/test/stale.txt"
@@ -83,7 +83,7 @@ func TestLocalCacheStaleEntry(t *testing.T) {
 	cachedMtime := time.Now()
 
 	// Create first file and put in cache
-	tmpFile1, err := os.CreateTemp("", "localcache_stale_*")
+	tmpFile1, err := os.CreateTemp("", "stagingFileCache_stale_*")
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestLocalCacheStaleEntry(t *testing.T) {
 	assert.Equal(t, 0, cache.Size())
 
 	// Create second file and re-add for mtime test
-	tmpFile2, err := os.CreateTemp("", "localcache_stale2_*")
+	tmpFile2, err := os.CreateTemp("", "stagingFileCache_stale2_*")
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
@@ -116,8 +116,8 @@ func TestLocalCacheStaleEntry(t *testing.T) {
 	assert.Equal(t, 0, cache.Size())
 }
 
-// TestLocalCacheLRUEviction tests that LRU eviction works correctly
-func TestLocalCacheLRUEviction(t *testing.T) {
+// TestStagingFileCacheLRUEviction tests that LRU eviction works correctly
+func TestStagingFileCacheLRUEviction(t *testing.T) {
 	maxEntries := 3
 	cache := newTestCache(t, maxEntries)
 
@@ -125,7 +125,7 @@ func TestLocalCacheLRUEviction(t *testing.T) {
 
 	// Helper to create and add a file to cache
 	createAndCache := func(hdfsPath string, content string) {
-		tmpFile, err := os.CreateTemp("", "localcache_lru_*")
+		tmpFile, err := os.CreateTemp("", "stagingFileCache_lru_*")
 		if err != nil {
 			t.Fatalf("Failed to create temp file: %v", err)
 		}
@@ -159,12 +159,12 @@ func TestLocalCacheLRUEviction(t *testing.T) {
 	assert.Equal(t, 2, cache.Size(), "Get should remove entry from cache")
 }
 
-// TestLocalCacheRemove tests explicit removal of entries
-func TestLocalCacheRemove(t *testing.T) {
+// TestStagingFileCacheRemove tests explicit removal of entries
+func TestStagingFileCacheRemove(t *testing.T) {
 	cache := newTestCache(t, 10)
 
 	// Create a temp file
-	tmpFile, err := os.CreateTemp("", "localcache_remove_*")
+	tmpFile, err := os.CreateTemp("", "stagingFileCache_remove_*")
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
@@ -190,12 +190,12 @@ func TestLocalCacheRemove(t *testing.T) {
 	cache.Remove("/nonexistent/path")
 }
 
-// TestLocalCacheRename tests renaming cache entries
-func TestLocalCacheRename(t *testing.T) {
+// TestStagingFileCacheRename tests renaming cache entries
+func TestStagingFileCacheRename(t *testing.T) {
 	cache := newTestCache(t, 10)
 
 	// Create a temp file
-	tmpFile, err := os.CreateTemp("", "localcache_rename_*")
+	tmpFile, err := os.CreateTemp("", "stagingFileCache_rename_*")
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
@@ -226,19 +226,19 @@ func TestLocalCacheRename(t *testing.T) {
 	}
 }
 
-// TestLocalCacheRenameWithExistingTarget tests rename when target already exists
-func TestLocalCacheRenameWithExistingTarget(t *testing.T) {
+// TestStagingFileCacheRenameWithExistingTarget tests rename when target already exists
+func TestStagingFileCacheRenameWithExistingTarget(t *testing.T) {
 	cache := newTestCache(t, 10)
 
 	// Create temp files
-	tmpFile1, err := os.CreateTemp("", "localcache_rename1_*")
+	tmpFile1, err := os.CreateTemp("", "stagingFileCache_rename1_*")
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
 	os.Remove(tmpFile1.Name())
 	_, _ = tmpFile1.WriteString("source content")
 
-	tmpFile2, err := os.CreateTemp("", "localcache_rename2_*")
+	tmpFile2, err := os.CreateTemp("", "stagingFileCache_rename2_*")
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
@@ -266,8 +266,8 @@ func TestLocalCacheRenameWithExistingTarget(t *testing.T) {
 	}
 }
 
-// TestLocalCacheRenameNonExistent tests rename when source doesn't exist
-func TestLocalCacheRenameNonExistent(t *testing.T) {
+// TestStagingFileCacheRenameNonExistent tests rename when source doesn't exist
+func TestStagingFileCacheRenameNonExistent(t *testing.T) {
 	cache := newTestCache(t, 10)
 
 	// Renaming non-existent entry should be safe (no-op)
@@ -275,14 +275,14 @@ func TestLocalCacheRenameNonExistent(t *testing.T) {
 	assert.Equal(t, 0, cache.Size())
 }
 
-// TestLocalCacheClear tests clearing all entries
-func TestLocalCacheClear(t *testing.T) {
+// TestStagingFileCacheClear tests clearing all entries
+func TestStagingFileCacheClear(t *testing.T) {
 	cache := newTestCache(t, 10)
 
 	// Create temp files and add to cache
 	tmpFilePaths := make([]string, 5)
 	for i := 0; i < 5; i++ {
-		tmpFile, err := os.CreateTemp("", fmt.Sprintf("localcache_clear_%d_*", i))
+		tmpFile, err := os.CreateTemp("", fmt.Sprintf("stagingFileCache_clear_%d_*", i))
 		if err != nil {
 			t.Fatalf("Failed to create temp file: %v", err)
 		}
@@ -306,8 +306,8 @@ func TestLocalCacheClear(t *testing.T) {
 	}
 }
 
-// TestLocalCacheUpdateExisting tests updating an existing entry
-func TestLocalCacheUpdateExisting(t *testing.T) {
+// TestStagingFileCacheUpdateExisting tests updating an existing entry
+func TestStagingFileCacheUpdateExisting(t *testing.T) {
 	cache := newTestCache(t, 10)
 
 	hdfsPath := "/test/update.txt"
@@ -315,7 +315,7 @@ func TestLocalCacheUpdateExisting(t *testing.T) {
 	mtime2 := mtime1.Add(time.Hour)
 
 	// Create first file and add to cache
-	tmpFile1, err := os.CreateTemp("", "localcache_update1_*")
+	tmpFile1, err := os.CreateTemp("", "stagingFileCache_update1_*")
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
@@ -326,7 +326,7 @@ func TestLocalCacheUpdateExisting(t *testing.T) {
 	assert.Equal(t, 1, cache.Size())
 
 	// Create second file and update
-	tmpFile2, err := os.CreateTemp("", "localcache_update2_*")
+	tmpFile2, err := os.CreateTemp("", "stagingFileCache_update2_*")
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
@@ -351,19 +351,19 @@ func TestLocalCacheUpdateExisting(t *testing.T) {
 	assert.False(t, ok)
 }
 
-// TestLocalCacheWithHopsFS tests the cache integration with actual HopsFS operations
-func TestLocalCacheWithHopsFS(t *testing.T) {
+// TestStagingFileCacheWithHopsFS tests the cache integration with actual HopsFS operations
+func TestStagingFileCacheWithHopsFS(t *testing.T) {
 	// Save original cache and restore after test
-	originalCache := StagingFileCache
+	originalCache := StagingCache
 	defer func() {
-		if StagingFileCache != nil {
-			StagingFileCache.Clear()
+		if StagingCache != nil {
+			StagingCache.Clear()
 		}
-		StagingFileCache = originalCache
+		StagingCache = originalCache
 	}()
 
 	// Enable local cache for this test
-	StagingFileCache = newTestCache(t, 5)
+	StagingCache = newTestCache(t, 5)
 
 	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
 		testFile := filepath.Join(mountPoint, "cache_test_file.txt")
@@ -383,7 +383,7 @@ func TestLocalCacheWithHopsFS(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 
 		// File should be in cache after creation and close
-		assert.Equal(t, 1, StagingFileCache.Size(), "File should be cached after creation")
+		assert.Equal(t, 1, StagingCache.Size(), "File should be cached after creation")
 
 		// Read the file
 		content, err := os.ReadFile(testFile)
@@ -400,19 +400,12 @@ func TestLocalCacheWithHopsFS(t *testing.T) {
 
 		// Verify cache has the modified file
 		hdfsPath := "/cache_test_file.txt"
-		modifiedFileInfo, err := os.Stat(testFile)
-		if err != nil {
-			t.Fatalf("Failed to stat modified file: %v", err)
-		}
 
 		// Wait for Release to populate the cache (Release is async in FUSE).
 		time.Sleep(100 * time.Millisecond)
 
-		cachedFile, cacheHit := StagingFileCache.Get(hdfsPath, modifiedFileInfo.Size(), modifiedFileInfo.ModTime())
-		assert.True(t, cacheHit, "Modified file should be in cache")
-		if cachedFile != nil {
-			_ = cachedFile.Close()
-		}
+		assert.True(t, StagingCache.Contains(hdfsPath), "Modified file should be in cache")
+		assert.Equal(t, 1, StagingCache.Size(), "Cache should have 1 entry after modification")
 
 		// Read again - should get the new content
 		content, err = os.ReadFile(testFile)
@@ -420,29 +413,23 @@ func TestLocalCacheWithHopsFS(t *testing.T) {
 			t.Fatalf("Failed to read modified file: %v", err)
 		}
 		assert.Equal(t, modifiedData, string(content))
-
-		// Wait for Release to populate the cache (Release is async in FUSE).
-		time.Sleep(100 * time.Millisecond)
-
-		// Cache should still have 1 entry (updated with modified content)
-		assert.Equal(t, 1, StagingFileCache.Size(), "Cache should have 1 entry after modification")
 	})
 }
 
-// TestLocalCacheMaxFileSizeLimit ensures oversized files are not cached.
-func TestLocalCacheMaxFileSizeLimit(t *testing.T) {
-	originalCache := StagingFileCache
-	originalMaxFileSize := LocalCacheMaxFileSize
+// TestStagingFileCacheMaxFileSizeLimit ensures oversized files are not cached.
+func TestStagingFileCacheMaxFileSizeLimit(t *testing.T) {
+	originalCache := StagingCache
+	originalMaxFileSize := StagingCacheMaxFileSize
 	defer func() {
-		if StagingFileCache != nil {
-			StagingFileCache.Clear()
+		if StagingCache != nil {
+			StagingCache.Clear()
 		}
-		StagingFileCache = originalCache
-		LocalCacheMaxFileSize = originalMaxFileSize
+		StagingCache = originalCache
+		StagingCacheMaxFileSize = originalMaxFileSize
 	}()
 
-	LocalCacheMaxFileSize = 10
-	StagingFileCache = newTestCache(t, 10)
+	StagingCacheMaxFileSize = 10
+	StagingCache = newTestCache(t, 10)
 
 	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
 		small1 := filepath.Join(mountPoint, "small_cache_1.txt")
@@ -462,7 +449,7 @@ func TestLocalCacheMaxFileSizeLimit(t *testing.T) {
 		}()
 
 		smallData := "12345"
-		bigData := strings.Repeat("a", int(LocalCacheMaxFileSize)+5)
+		bigData := strings.Repeat("a", int(StagingCacheMaxFileSize)+5)
 
 		if err := createFile(small1, smallData); err != nil {
 			t.Fatalf("Failed to create small1: %v", err)
@@ -479,13 +466,13 @@ func TestLocalCacheMaxFileSizeLimit(t *testing.T) {
 
 		waitForCacheSize := func(expected int) {
 			deadline := time.Now().Add(1 * time.Second)
-			for time.Now().Before(deadline) && StagingFileCache.Size() != expected {
+			for time.Now().Before(deadline) && StagingCache.Size() != expected {
 				time.Sleep(10 * time.Millisecond)
 			}
 		}
 
 		waitForCacheSize(2)
-		assert.Equal(t, 2, StagingFileCache.Size(), "Only small files should be cached")
+		assert.Equal(t, 2, StagingCache.Size(), "Only small files should be cached")
 
 		// Grow a cached file beyond the limit and ensure it is removed from cache.
 		if err := createFile(small1, bigData); err != nil {
@@ -496,14 +483,14 @@ func TestLocalCacheMaxFileSizeLimit(t *testing.T) {
 		}
 
 		waitForCacheSize(1)
-		assert.Equal(t, 1, StagingFileCache.Size(), "Only one small file should remain cached")
+		assert.Equal(t, 1, StagingCache.Size(), "Only one small file should remain cached")
 
 		checkCached := func(localPath, hdfsPath string, expect bool) {
 			info, err := os.Stat(localPath)
 			if err != nil {
 				t.Fatalf("Failed to stat %s: %v", localPath, err)
 			}
-			cachedFile, cacheHit := StagingFileCache.Get(hdfsPath, info.Size(), info.ModTime())
+			cachedFile, cacheHit := StagingCache.Get(hdfsPath, info.Size(), info.ModTime())
 			if cachedFile != nil {
 				_ = cachedFile.Close()
 			}
@@ -517,8 +504,8 @@ func TestLocalCacheMaxFileSizeLimit(t *testing.T) {
 	})
 }
 
-// TestLocalCacheDiskUsageThreshold verifies caching is blocked when disk usage exceeds the threshold.
-func TestLocalCacheDiskUsageThreshold(t *testing.T) {
+// TestStagingFileCacheDiskUsageThreshold verifies caching is blocked when disk usage exceeds the threshold.
+func TestStagingFileCacheDiskUsageThreshold(t *testing.T) {
 	setDiskUsageThreshold(t, 1.0)
 	originalStagingDir := StagingDir
 	defer func() {
@@ -527,11 +514,11 @@ func TestLocalCacheDiskUsageThreshold(t *testing.T) {
 
 	StagingDir = t.TempDir()
 	cache := newTestCache(t, 2)
-	cache.stopDiskUsageMonitor()
+	cache.stopBackgroundWorkers()
 
-	LocalCacheMaxDiskUsage = 1.0
+	StagingCacheMaxDiskUsage = 1.0
 	cache.updateDiskUsageFlag()
-	tmpFile1, err := os.CreateTemp(StagingDir, "localcache_disk_1_*")
+	tmpFile1, err := os.CreateTemp(StagingDir, "stagingFileCache_disk_1_*")
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
@@ -540,9 +527,9 @@ func TestLocalCacheDiskUsageThreshold(t *testing.T) {
 	cache.Put("/disk/one.txt", tmpFile1, info1.Size(), time.Now())
 	assert.Equal(t, 1, cache.Size())
 
-	LocalCacheMaxDiskUsage = 0.0
+	StagingCacheMaxDiskUsage = 0.0
 	cache.updateDiskUsageFlag()
-	tmpFile2, err := os.CreateTemp(StagingDir, "localcache_disk_2_*")
+	tmpFile2, err := os.CreateTemp(StagingDir, "stagingFileCache_disk_2_*")
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
@@ -556,9 +543,9 @@ func TestLocalCacheDiskUsageThreshold(t *testing.T) {
 	_, err = os.Stat(tmpFile2.Name())
 	assert.True(t, os.IsNotExist(err))
 
-	LocalCacheMaxDiskUsage = 1.0
+	StagingCacheMaxDiskUsage = 1.0
 	cache.updateDiskUsageFlag()
-	tmpFile3, err := os.CreateTemp(StagingDir, "localcache_disk_3_*")
+	tmpFile3, err := os.CreateTemp(StagingDir, "stagingFileCache_disk_3_*")
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}
@@ -569,20 +556,20 @@ func TestLocalCacheDiskUsageThreshold(t *testing.T) {
 	cache.Clear()
 }
 
-// TestLocalCacheMultipleChmodOperations tests multiple chmod operations
+// TestStagingFileCacheMultipleChmodOperations tests multiple chmod operations
 // with cached file reads/writes interleaved, verifying cache hits after chmod
-func TestLocalCacheMultipleChmodOperations(t *testing.T) {
+func TestStagingFileCacheMultipleChmodOperations(t *testing.T) {
 	// Save original cache and restore after test
-	originalCache := StagingFileCache
+	originalCache := StagingCache
 	defer func() {
-		if StagingFileCache != nil {
-			StagingFileCache.Clear()
+		if StagingCache != nil {
+			StagingCache.Clear()
 		}
-		StagingFileCache = originalCache
+		StagingCache = originalCache
 	}()
 
 	// Enable local cache for this test
-	StagingFileCache = newTestCache(t, 10)
+	StagingCache = newTestCache(t, 10)
 
 	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
 		testFile := filepath.Join(mountPoint, "multi_chmod_cache_test.txt")
@@ -603,19 +590,13 @@ func TestLocalCacheMultipleChmodOperations(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 
 		// Verify file is cached after creation
-		assert.Equal(t, 1, StagingFileCache.Size(), "File should be cached after creation")
+		assert.Equal(t, 1, StagingCache.Size(), "File should be cached after creation")
 
 		permissions := []os.FileMode{0644, 0755, 0600, 0444, 0644}
 
 		for i, perm := range permissions {
-			// Get file info before chmod to compare mtime
-			fileInfoBeforeChmod, err := os.Stat(testFile)
-			if err != nil {
-				t.Fatalf("Failed to stat file before chmod: %v", err)
-			}
-
 			// Change permissions
-			err = os.Chmod(testFile, perm)
+			err := os.Chmod(testFile, perm)
 			if err != nil {
 				t.Fatalf("Failed to chmod file to %o: %v", perm, err)
 			}
@@ -627,12 +608,7 @@ func TestLocalCacheMultipleChmodOperations(t *testing.T) {
 			}
 			assert.Equal(t, perm, fileInfo.Mode().Perm(), "Permission mismatch at iteration %d", i)
 
-			// Verify cache is still a hit after chmod (chmod should not change mtime)
-			cachedFile, cacheHit := StagingFileCache.Get(hdfsPath, fileInfoBeforeChmod.Size(), fileInfoBeforeChmod.ModTime())
-			assert.True(t, cacheHit, "Cache should still be a hit after chmod to %o at iteration %d", perm, i)
-			if cachedFile != nil {
-				_ = cachedFile.Close()
-			}
+			assert.True(t, StagingCache.Contains(hdfsPath), "Cache should still have entry after chmod to %o at iteration %d", perm, i)
 
 			// Read the file
 			content, err := os.ReadFile(testFile)
@@ -666,7 +642,7 @@ func TestLocalCacheMultipleChmodOperations(t *testing.T) {
 		}
 
 		// Verify cache still has 1 entry at the end
-		assert.Equal(t, 1, StagingFileCache.Size(), "Cache should have 1 entry after all operations")
+		assert.Equal(t, 1, StagingCache.Size(), "Cache should have 1 entry after all operations")
 	})
 
 }

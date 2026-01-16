@@ -15,10 +15,10 @@ import (
 	"hopsworks.ai/hopsfsmount/internal/hopsfsmount/logger"
 )
 
-// LocalCache manages cached staging files using LRU eviction.
+// StagingFileCache manages cached staging files using LRU eviction.
 // When files are written and closed, their local staging copies are kept
 // in this cache for faster reopening instead of downloading from DFS again.
-type LocalCache struct {
+type StagingFileCache struct {
 	mu           sync.Mutex
 	maxEntries   int
 	entries      map[string]*CacheEntry
@@ -53,23 +53,31 @@ type EntryStats struct {
 	LastAccess time.Time
 }
 
-// StagingFileCache Local cache instance, initialized in config.go if caching is enabled
-var StagingFileCache *LocalCache
+// CacheStats contains global cache statistics.
+type CacheStats struct {
+	Hits    int64
+	Misses  int64
+	Entries int
+	Bytes   int64
+}
 
-// NewLocalCache creates a new cache with the given maximum number of entries.
+// Cache is the global staging file cache instance, initialized in config.go if caching is enabled
+var StagingCache *StagingFileCache
+
+// NewStagingFileCache creates a new cache with the given maximum number of entries.
 // When the cache is full, the least recently used entry is evicted.
-func NewLocalCache(maxEntries int) *LocalCache {
-	cache := &LocalCache{
+func NewStagingFileCache(maxEntries int) *StagingFileCache {
+	cache := &StagingFileCache{
 		maxEntries:   maxEntries,
 		entries:      make(map[string]*CacheEntry),
 		entriesStats: make(map[string]*EntryStats),
 		lruList:      list.New(),
 	}
 
-	cache.startDiskUsageMonitor(LocalCacheDiskUsageCheckInterval)
-	if LocalCacheStatsReportingInterval > 0 {
+	cache.startDiskUsageMonitor(StagingCacheDiskUsageCheckInterval)
+	if StagingCacheStatsReportingInterval > 0 {
 		cache.globalStatsEnabled = true
-		cache.startStatsReporter(LocalCacheStatsReportingInterval)
+		cache.startStatsReporter(StagingCacheStatsReportingInterval)
 	}
 	return cache
 }
@@ -81,7 +89,7 @@ func NewLocalCache(maxEntries int) *LocalCache {
 // If the cache entry is stale (metadata mismatch), it is automatically removed.
 // Moves the entry to the front of the LRU list on successful access.
 // Note: The returned handle is removed from the cache - caller takes ownership.
-func (c *LocalCache) Get(hdfsPath string, upstreamSize int64, upstreamMtime time.Time) (*os.File, bool) {
+func (c *StagingFileCache) Get(hdfsPath string, upstreamSize int64, upstreamMtime time.Time) (*os.File, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -117,7 +125,8 @@ func (c *LocalCache) Get(hdfsPath string, upstreamSize int64, upstreamMtime time
 	c.lruList.Remove(entry.lruElement)
 	delete(c.entries, hdfsPath)
 
-	// Update hit statistics
+	// Update stats
+	c.globalCachedBytes.Add(-entry.size)
 	hitCount := c.recordHit(hdfsPath)
 
 	// Seek to beginning for the caller
@@ -137,7 +146,7 @@ func (c *LocalCache) Get(hdfsPath string, upstreamSize int64, upstreamMtime time
 // If an entry already exists for this path, it is replaced.
 // The mtime parameter should be the modification time from HopsFS, used
 // to detect if the file was modified by another client.
-func (c *LocalCache) Put(hdfsPath string, handle *os.File, size int64, mtime time.Time) {
+func (c *StagingFileCache) Put(hdfsPath string, handle *os.File, size int64, mtime time.Time) {
 	if c.maxEntries <= 0 {
 		c.discardHandle(hdfsPath, handle)
 		return
@@ -151,7 +160,7 @@ func (c *LocalCache) Put(hdfsPath string, handle *os.File, size int64, mtime tim
 		c.removeEntry(hdfsPath)
 	}
 
-	if !c.ShouldCache(size, hdfsPath) {
+	if !c.ShouldCache(size, hdfsPath, false) {
 		c.discardHandle(hdfsPath, handle)
 		return
 	}
@@ -188,7 +197,7 @@ func (c *LocalCache) Put(hdfsPath string, handle *os.File, size int64, mtime tim
 
 // Remove explicitly removes an entry from the cache.
 // This should be called when a file is deleted in DFS.
-func (c *LocalCache) Remove(hdfsPath string) {
+func (c *StagingFileCache) Remove(hdfsPath string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -198,7 +207,7 @@ func (c *LocalCache) Remove(hdfsPath string) {
 // Rename transfers a cache entry from oldPath to newPath.
 // If the entry doesn't exist for oldPath, this is a no-op.
 // If an entry already exists for newPath, it is replaced.
-func (c *LocalCache) Rename(oldPath, newPath string) {
+func (c *StagingFileCache) Rename(oldPath, newPath string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -240,7 +249,7 @@ func (c *LocalCache) Rename(oldPath, newPath string) {
 }
 
 // Must be called with mutex held.
-func (c *LocalCache) recordHit(hdfsPath string) int {
+func (c *StagingFileCache) recordHit(hdfsPath string) int {
 	if c.globalStatsEnabled {
 		c.globalHits.Add(1)
 	}
@@ -249,15 +258,16 @@ func (c *LocalCache) recordHit(hdfsPath string) int {
 	if stats == nil {
 		stats = &EntryStats{}
 		c.entriesStats[hdfsPath] = stats
-	} else {
-		stats.HitCount++
-		stats.LastAccess = time.Now()
 	}
+
+	stats.HitCount++
+	stats.LastAccess = time.Now()
+
 	return stats.HitCount
 }
 
 // removeEntry removes an entry without locking (internal use only)
-func (c *LocalCache) removeEntry(hdfsPath string) {
+func (c *StagingFileCache) removeEntry(hdfsPath string) {
 	entry, ok := c.entries[hdfsPath]
 	if !ok {
 		return
@@ -291,7 +301,7 @@ func (c *LocalCache) removeEntry(hdfsPath string) {
 
 // evictOldest removes the least recently used entry from the cache.
 // Must be called with mutex held.
-func (c *LocalCache) evictOldest() {
+func (c *StagingFileCache) evictOldest() {
 	oldest := c.lruList.Back()
 	if oldest == nil {
 		return
@@ -303,7 +313,7 @@ func (c *LocalCache) evictOldest() {
 
 // Clear removes all entries from the cache.
 // This should be called during shutdown.
-func (c *LocalCache) Clear() {
+func (c *StagingFileCache) Clear() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -321,18 +331,53 @@ func (c *LocalCache) Clear() {
 	})
 }
 
+// Shutdown stops background goroutines and clears the cache.
+func (c *StagingFileCache) Shutdown() {
+	c.stopBackgroundWorkers()
+	c.Clear()
+	logger.Info("Staging file cache shutdown complete", nil)
+}
+
 // Size returns the current number of entries in the cache.
-func (c *LocalCache) Size() int {
+func (c *StagingFileCache) Size() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.entries)
 }
 
-// ShouldCache returns true if a file should be downloaded to the local cache.
-// Checks file size limits and disk usage.
-func (c *LocalCache) ShouldCache(fileSize int64, path string) bool {
+// Contains checks if a path exists in the cache (without validation).
+func (c *StagingFileCache) Contains(hdfsPath string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.entries[hdfsPath]
+	return ok
+}
+
+// GetAndResetStats returns cache statistics and resets hit/miss counters.
+func (c *StagingFileCache) GetAndResetStats() CacheStats {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return CacheStats{
+		Hits:    c.globalHits.Swap(0),
+		Misses:  c.globalMisses.Swap(0),
+		Entries: len(c.entries),
+		Bytes:   c.globalCachedBytes.Load(),
+	}
+}
+
+// ShouldCache returns true if a file should be cached locally.
+func (c *StagingFileCache) ShouldCache(fileSize int64, path string, applyDownloadLimit bool) bool {
+	if applyDownloadLimit && StagingCacheMaxDownloadSize > 0 && fileSize > StagingCacheMaxDownloadSize {
+		logger.Debug("File too large for download caching", logger.Fields{
+			Operation: cache,
+			Path:      path,
+			FileSize:  fileSize,
+		})
+		return false
+	}
+
 	// Check if file exceeds max cacheable size
-	if LocalCacheMaxFileSize > 0 && fileSize > LocalCacheMaxFileSize {
+	if StagingCacheMaxFileSize > 0 && fileSize > StagingCacheMaxFileSize {
 		logger.Debug("File too large for caching", logger.Fields{
 			Operation: cache,
 			Path:      path,
@@ -352,7 +397,7 @@ func (c *LocalCache) ShouldCache(fileSize int64, path string) bool {
 	return true
 }
 
-func (c *LocalCache) discardHandle(hdfsPath string, handle *os.File) {
+func (c *StagingFileCache) discardHandle(hdfsPath string, handle *os.File) {
 	localPath := handle.Name()
 	if err := handle.Close(); err != nil {
 		logger.Warn("Failed to close staging file handle", logger.Fields{
@@ -376,7 +421,7 @@ func (c *LocalCache) discardHandle(hdfsPath string, handle *os.File) {
 	}
 }
 
-func (c *LocalCache) startDiskUsageMonitor(interval time.Duration) {
+func (c *StagingFileCache) startDiskUsageMonitor(interval time.Duration) {
 	c.monitorStop = make(chan struct{})
 	c.monitorDone = make(chan struct{})
 	c.updateDiskUsageFlag()
@@ -395,7 +440,8 @@ func (c *LocalCache) startDiskUsageMonitor(interval time.Duration) {
 	}()
 }
 
-func (c *LocalCache) stopDiskUsageMonitor() {
+// stopBackgroundWorkers stops all background goroutines.
+func (c *StagingFileCache) stopBackgroundWorkers() {
 	c.monitorStopOnce.Do(func() {
 		if c.monitorStop == nil {
 			return
@@ -406,25 +452,22 @@ func (c *LocalCache) stopDiskUsageMonitor() {
 }
 
 // startStatsReporter starts a goroutine that logs and resets global cache statistics periodically.
-func (c *LocalCache) startStatsReporter(interval time.Duration) {
+func (c *StagingFileCache) startStatsReporter(interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	go func() {
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				hits := c.globalHits.Swap(0)
-				misses := c.globalMisses.Swap(0)
-				cachedFiles := len(c.entries)
-				cachedBytes := c.globalCachedBytes.Load()
-				total := hits + misses
+				stats := c.GetAndResetStats()
+				total := stats.Hits + stats.Misses
 				hitRatio := float64(0)
 				if total > 0 {
-					hitRatio = float64(hits) / float64(total) * 100
+					hitRatio = float64(stats.Hits) / float64(total) * 100
 				}
 				logger.Info(fmt.Sprintf(
 					"Cache stats: hits=%d, misses=%d, hit_ratio=%.1f%%, cached_files=%d, cached_bytes=%d",
-					hits, misses, hitRatio, cachedFiles, cachedBytes), logger.Fields{
+					stats.Hits, stats.Misses, hitRatio, stats.Entries, stats.Bytes), logger.Fields{
 					Operation: cache,
 				})
 			case <-c.monitorStop:
@@ -435,7 +478,7 @@ func (c *LocalCache) startStatsReporter(interval time.Duration) {
 }
 
 // hitRatio returns the current cache hit ratio as a percentage.
-func (c *LocalCache) hitRatio() float64 {
+func (c *StagingFileCache) hitRatio() float64 {
 	hits := c.globalHits.Load()
 	misses := c.globalMisses.Load()
 	total := hits + misses
@@ -445,8 +488,8 @@ func (c *LocalCache) hitRatio() float64 {
 	return float64(hits) / float64(total) * 100
 }
 
-func (c *LocalCache) updateDiskUsageFlag() {
-	exceeds, err := diskUsageExceeds(StagingDir, LocalCacheMaxDiskUsage)
+func (c *StagingFileCache) updateDiskUsageFlag() {
+	excessBytes, err := diskUsageExcess(StagingDir, StagingCacheMaxDiskUsage)
 	if err != nil {
 		logger.Warn("Failed to check disk usage for caching", logger.Fields{
 			Operation: cache,
@@ -455,83 +498,108 @@ func (c *LocalCache) updateDiskUsageFlag() {
 		})
 		return
 	}
-	c.diskUsageExceeded.Store(exceeds)
+	c.diskUsageExceeded.Store(excessBytes > 0)
 
-	if exceeds {
-		c.evictUntilBelowThreshold()
+	if excessBytes > 0 {
+		c.evictUntilBelowThreshold(excessBytes)
 	}
 }
 
-// evictUntilBelowThreshold removes cached entries in batches until disk usage
-// falls below the target threshold (5% below max) or the cache is empty.
-func (c *LocalCache) evictUntilBelowThreshold() {
-	target := LocalCacheMaxDiskUsage - 0.05
-	if target < 0 {
-		target = 0
+// evictUntilBelowThreshold removes cached entries until disk usage falls below
+// the threshold or the cache is empty. excessBytes is the amount over threshold.
+func (c *StagingFileCache) evictUntilBelowThreshold(excessBytes int64) {
+	cachedBytes := c.globalCachedBytes.Load()
+	if cachedBytes <= excessBytes {
+		// Even clearing entire cache won't cover the excess, clear it all
+		c.Clear()
+		return
 	}
 
-	for {
-		exceeds, err := diskUsageExceeds(StagingDir, target)
-		if err != nil || !exceeds {
+	// Add 5% of total storage as buffer to avoid thrashing
+	var buffer int64
+	var stat unix.Statfs_t
+	if err := unix.Statfs(StagingDir, &stat); err == nil {
+		buffer = int64(stat.Blocks*uint64(stat.Bsize)) / 20
+	}
+	bytesToFree := excessBytes + buffer
+	var freedBytes int64
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for freedBytes < bytesToFree && len(c.entries) > 0 {
+		oldest := c.lruList.Back()
+		if oldest == nil {
 			return
 		}
-
-		c.mu.Lock()
-		// Evict up to 10 entries per batch
-		for i := 0; i < 10 && len(c.entries) > 0; i++ {
-			c.evictOldest()
-		}
-		remaining := len(c.entries)
-		c.mu.Unlock()
-
-		if remaining == 0 {
-			return
-		}
+		entry := oldest.Value.(*CacheEntry)
+		freedBytes += entry.size
+		c.removeEntry(entry.hdfsPath)
 	}
 }
 
-func diskUsageExceeds(path string, threshold float64) (bool, error) {
+// diskUsageExcess returns how many bytes over the threshold the disk usage is.
+// Returns 0 if usage is below threshold.
+func diskUsageExcess(path string, threshold float64) (excessBytes int64, err error) {
 	var stat unix.Statfs_t
 	if err := unix.Statfs(path, &stat); err != nil {
-		return false, err
+		return 0, err
 	}
 	totalBytes := stat.Blocks * uint64(stat.Bsize)
 	if totalBytes == 0 {
-		return false, nil
+		return 0, nil
 	}
 	availableBytes := stat.Bavail * uint64(stat.Bsize)
 	usedBytes := totalBytes - availableBytes
-	usedRatio := float64(usedBytes) / float64(totalBytes)
-	return usedRatio >= threshold, nil
+	targetUsedBytes := uint64(float64(totalBytes) * threshold)
+
+	if usedBytes > targetUsedBytes {
+		return int64(usedBytes - targetUsedBytes), nil
+	}
+	return 0, nil
 }
 
 // GetOrLoad tries to get a file from cache, or downloads it to cache if not found.
-// Returns an *os.File handle if successful (either from cache or freshly downloaded), or nil if caching is not possible.
-func (c *LocalCache) GetOrLoad(file *FileINode, hdfsAccessor HdfsAccessor, operation string) *os.File {
+// Returns an *os.File handle if successful (either from cache or freshly downloaded), or (nil, nil) if caching is not possible.
+// Returns (nil, error) if staging file creation fails.
+func (c *StagingFileCache) GetOrLoad(file *FileINode, hdfsAccessor HdfsAccessor, operation string) (*os.File, error) {
 	absPath := file.AbsolutePath()
 
-	upstreamInfo, err := hdfsAccessor.Stat(absPath)
-	if err != nil {
-		logger.Warn("Failed to stat file for cache validation, skipping cache", logger.Fields{
-			operation: cache,
+	// Check if file exists in cache before making expensive Stat call
+	if c.Contains(absPath) {
+		upstreamInfo, err := hdfsAccessor.Stat(absPath)
+		if err != nil {
+			logger.Warn("Failed to stat file for cache validation, skipping cache", logger.Fields{
+				Operation: cache,
+				Path:      absPath,
+				Error:     err,
+			})
+			return nil, nil
+		}
+
+		// Update file.Attrs with upstream metadata so closeStaging can use correct mtime for caching
+		file.Attrs.Size = upstreamInfo.Size
+		file.Attrs.Mtime = upstreamInfo.Mtime
+
+		if cachedFile, ok := c.Get(absPath, int64(upstreamInfo.Size), upstreamInfo.Mtime); ok {
+			return cachedFile, nil
+		}
+	} else {
+		if c.globalStatsEnabled {
+			c.globalMisses.Add(1)
+		}
+		logger.Debug("Cache miss for staging file", logger.Fields{
+			Operation: cache,
 			Path:      absPath,
-			Error:     err,
 		})
-		return nil
 	}
 
-	// Update file.Attrs with upstream metadata so closeStaging can use correct mtime for caching
-	file.Attrs.Size = upstreamInfo.Size
-	file.Attrs.Mtime = upstreamInfo.Mtime
-
-	if cachedFile, ok := c.Get(absPath, int64(upstreamInfo.Size), upstreamInfo.Mtime); ok {
-		return cachedFile
-	}
-
-	if !c.ShouldCache(int64(file.Attrs.Size), file.AbsolutePath()) {
-		return nil
+	// Not in cache or stale - check if we should download
+	if !c.ShouldCache(int64(file.Attrs.Size), absPath, true) {
+		return nil, nil
 	}
 
 	// Download to staging file
-	return file.createStagingFileForRead(operation)
+	stagingFile, err := file.newStagingFile(operation, true)
+	return stagingFile, err
 }

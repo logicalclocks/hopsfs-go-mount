@@ -7,7 +7,6 @@ package hopsfsmount
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math/rand"
 	"os"
 	"path"
@@ -153,11 +152,11 @@ func (file *FileINode) closeStaging() {
 	if file.fileProxy != nil { // if not already closed
 		cached := false
 		// If caching is enabled and this is a LocalRWFileProxy, add to cache
-		if lrwfp, ok := file.fileProxy.(*LocalRWFileProxy); ok && StagingFileCache != nil {
+		if lrwfp, ok := file.fileProxy.(*LocalRWFileProxy); ok && StagingCache != nil {
 			stat, statErr := lrwfp.localFile.Stat()
 			localPath := lrwfp.localFile.Name()
 			if statErr == nil && localPath != "" {
-				StagingFileCache.Put(file.AbsolutePath(), lrwfp.localFile, stat.Size(), file.Attrs.Mtime)
+				StagingCache.Put(file.AbsolutePath(), lrwfp.localFile, stat.Size(), file.Attrs.Mtime)
 				cached = true
 			}
 		}
@@ -298,7 +297,7 @@ func (file *FileINode) flushAttempt(operation string) error {
 
 	// Stat the file to get the server-assigned mtime after upload
 	// This is needed for cache validation on subsequent reads
-	if StagingFileCache != nil {
+	if StagingCache != nil {
 		upstreamInfo, err := hdfsAccessor.Stat(file.AbsolutePath())
 		if err != nil {
 			logger.Warn("Failed to stat file after upload, mtime may be stale", file.logInfo(logger.Fields{Operation: operation, Error: err}))
@@ -426,28 +425,40 @@ func (file *FileINode) createStagingFile(operation string, existsInDFS bool) (*o
 		}
 
 		// Check if we have a valid cached staging file for this path
-		if StagingFileCache != nil {
-			if localFile, ok := StagingFileCache.Get(absPath, int64(upstreamInfo.Size), upstreamInfo.Mtime); ok {
+		if StagingCache != nil {
+			if localFile, ok := StagingCache.Get(absPath, int64(upstreamInfo.Size), upstreamInfo.Mtime); ok {
 				logger.Debug("Using cached staging file", file.logInfo(logger.Fields{Operation: operation}))
 				return localFile, nil
 			}
 		}
 	}
 
-	stagingFile, err := ioutil.TempFile(StagingDir, "stage")
+	return file.newStagingFile(operation, existsInDFS)
+}
+
+// newStagingFile creates an unlinked staging file and optionally downloads content from DFS.
+func (file *FileINode) newStagingFile(operation string, download bool) (*os.File, error) {
+	stagingFile, err := os.CreateTemp(StagingDir, "stage")
 	if err != nil {
 		logger.Error("Failed to create staging file", file.logInfo(logger.Fields{Operation: operation, Error: err}))
 		return nil, err
 	}
 	// Unlink the file immediately - the handle remains valid but the file is not visible on disk.
 	os.Remove(stagingFile.Name())
-	logger.Info("Created staging file", file.logInfo(logger.Fields{Operation: operation, TmpFile: stagingFile.Name()}))
 
-	if existsInDFS {
+	if download {
 		if err := file.downloadToStaging(stagingFile, operation); err != nil {
+			stagingFile.Close()
+			return nil, err
+		}
+
+		if _, err := stagingFile.Seek(0, 0); err != nil {
+			stagingFile.Close()
 			return nil, err
 		}
 	}
+
+	logger.Info("Created staging file", file.logInfo(logger.Fields{Operation: operation, TmpFile: stagingFile.Name()}))
 	return stagingFile, nil
 }
 
@@ -475,37 +486,7 @@ func (file *FileINode) downloadToStaging(stagingFile *os.File, operation string)
 	return nil
 }
 
-// createStagingFileForRead creates a staging file, downloads content from DFS, and returns the file handle.
-// This is used when opening an existing file for reading and caching is enabled.
-// Returns an *os.File handle if successful, or nil if failed.
-func (file *FileINode) createStagingFileForRead(operation string) *os.File {
-	stagingFile, err := os.CreateTemp(StagingDir, "stage")
-	if err != nil {
-		logger.Error(
-			"Failed to create staging file for read",
-			file.logInfo(logger.Fields{Operation: operation, Error: err}))
-		return nil
-	}
-	os.Remove(stagingFile.Name())
-
-	if err := file.downloadToStaging(stagingFile, operation); err != nil {
-		_ = stagingFile.Close()
-		return nil
-	}
-
-	// Seek back to start for reading
-	if _, err := stagingFile.Seek(0, 0); err != nil {
-		stagingFile.Close()
-		return nil
-	}
-
-	logger.Info(
-		"Downloaded file to cache",
-		file.logInfo(logger.Fields{Operation: operation, TmpFile: stagingFile.Name()}))
-	return stagingFile
-}
-
-// Creates new file handle
+// NewFileHandle creates new file handle
 // Lock order: fileHandleMutex (1) alone
 // Called from Open which holds fileMutex (2), so order is: fileMutex (2) → fileHandleMutex (1)
 func (file *FileINode) NewFileHandle(existsInDFS bool, flags fuse.OpenFlags) (*FileHandle, error) {
@@ -541,8 +522,12 @@ func (file *FileINode) NewFileHandle(existsInDFS bool, flags fuse.OpenFlags) (*F
 			hdfsAccessor := file.FileSystem.getDFSConnector()
 
 			// Try to get from cache or download to cache
-			if StagingFileCache != nil {
-				if localFile := StagingFileCache.GetOrLoad(file, hdfsAccessor, operation); localFile != nil {
+			if StagingCache != nil {
+				localFile, err := StagingCache.GetOrLoad(file, hdfsAccessor, operation)
+				if err != nil {
+					return nil, err
+				}
+				if localFile != nil {
 					fh.File.fileProxy = &LocalRWFileProxy{localFile: localFile, file: file}
 				}
 			}
