@@ -79,12 +79,15 @@ func main() {
 	rLimit := syscall.Rlimit{
 		Cur: 1024 * 1024,
 		Max: 1024 * 1024}
-	err = syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit)
-	if err != nil {
-		logger.Error(fmt.Sprintf("Failed to update the maximum number of file descriptors from 1K to 1M, %v", err), logger.Fields{})
+	if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit); err != nil {
+		logger.Error(fmt.Sprintf("Failed to increase file descriptor limit: %v", err), logger.Fields{})
 	}
+	hopsfsmount.InitStagingFileCache()
 
 	defer func() {
+		if hopsfsmount.StagingCache != nil {
+			hopsfsmount.StagingCache.Shutdown()
+		}
 		fileSystem.Unmount(mountPoint)
 		logger.Info("Closing...", nil)
 		c.Close()
@@ -96,6 +99,9 @@ func main() {
 			//Handling INT/TERM signals - trying to gracefully unmount and exit
 			//TODO: before doing that we need to finish deferred flushes
 			logger.Info(fmt.Sprintf("Received signal: %s", x.String()), nil)
+			if hopsfsmount.StagingCache != nil {
+				hopsfsmount.StagingCache.Shutdown()
+			}
 			fileSystem.Unmount(mountPoint) // this will cause Serve() call below to exit
 			// Also reseting retry policy properties to stop useless retries
 			retryPolicy.MaxAttempts = 0

@@ -44,6 +44,12 @@ var FallBackUser = "root"
 var FallBackGroup = "root"
 var UserUmask string = ""
 var Umask os.FileMode
+var StagingCacheMaxEntries int = 10240
+var StagingCacheMaxFileSize int64 = 256 * 1024 * 1024   // 256MB
+var StagingCacheMaxDownloadSize int64 = 1 * 1024 * 1024 // 1MB
+var StagingCacheMaxDiskUsage float64 = 0.60
+var StagingCacheDiskUsageCheckInterval time.Duration = 1 * time.Second
+var StagingCacheStatsReportingInterval time.Duration = 0
 
 func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	flag.BoolVar(&LazyMount, "lazy", false, "Allows to mount HopsFS filesystem before HopsFS is available")
@@ -73,6 +79,12 @@ func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	flag.StringVar(&FallBackUser, "fallBackUser", "root", "Local user name if the DFS user is not found on the local file system")
 	flag.StringVar(&FallBackGroup, "fallBackGroup", "root", "Local group name if the DFS group is not found on the local file system.")
 	flag.StringVar(&UserUmask, "umask", "", "Umask for the file system. Must be a 4 digit octal number.")
+	flag.Int64Var(&StagingCacheMaxFileSize, "stagingCacheMaxFileSize", 256*1024*1024, "Max file size in bytes to cache locally (default: 256MB)")
+	flag.Int64Var(&StagingCacheMaxDownloadSize, "stagingCacheMaxDownloadSize", 1*1024*1024, "Max file size in bytes to download for caching (default: 1MB)")
+	flag.Float64Var(&StagingCacheMaxDiskUsage, "stagingCacheMaxDiskUsage", 0.60, "Max disk usage ratio for caching staging files (0.0-0.8, default: 0.60)")
+	flag.IntVar(&StagingCacheMaxEntries, "stagingCacheMaxEntries", 10240, "Max staging files to cache locally (0 to disable)")
+	flag.DurationVar(&StagingCacheDiskUsageCheckInterval, "stagingCacheDiskCheckInterval", 1*time.Second, "Interval for checking disk usage for cache eviction (default: 1s)")
+	flag.DurationVar(&StagingCacheStatsReportingInterval, "stagingCacheStatsReportingInterval", 0, "Interval for cache hit ratio reporting (0 to disable, e.g., 1m for every minute)")
 
 	flag.Usage = usage
 	flag.Parse()
@@ -113,8 +125,43 @@ func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	}
 	logger.Info(fmt.Sprintf("Using umask: %o", Umask), nil)
 
+	if StagingCacheMaxDiskUsage < 0.0 || StagingCacheMaxDiskUsage > 0.8 {
+		log.Fatalf("Invalid config. stagingCacheMaxDiskUsage must be between 0.0 and 0.8")
+	}
+
 	logger.Info(fmt.Sprintf("Staging dir is:%s, Using TLS: %v, RetryAttempts: %d,  LogFile: %s", StagingDir, Tls, retryPolicy.MaxAttempts, LogFile), nil)
 	logger.Info(fmt.Sprintf("hopsfs-mount: current head GITCommit: %s Built time: %s Built by: %s ", GITCOMMIT, BUILDTIME, HOSTNAME), nil)
+}
+
+// InitStagingFileCache initializes the staging file cache based on configuration and OS limits.
+func InitStagingFileCache() {
+	if StagingCacheMaxDiskUsage <= 0 || StagingCacheMaxEntries <= 0 {
+		logger.Info("Staging file cache disabled", nil)
+		return
+	}
+
+	// Adjust cache size based on OS file descriptor limit
+	var rlimit unix.Rlimit
+	if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &rlimit); err != nil {
+		logger.Error("Failed to get file descriptor limit, disabling cache", logger.Fields{Error: err})
+		return
+	}
+
+	if rlimit.Cur != unix.RLIM_INFINITY {
+		// Use 50% of soft limit to leave room for other file descriptors
+		halfSoftLimit := int(rlimit.Cur / 2)
+		if halfSoftLimit < StagingCacheMaxEntries {
+			StagingCacheMaxEntries = halfSoftLimit
+		}
+	}
+
+	if StagingCacheMaxEntries <= 0 {
+		logger.Info("Staging file cache disabled (insufficient file descriptors)", nil)
+		return
+	}
+
+	StagingCache = NewStagingFileCache(StagingCacheMaxEntries)
+	logger.Info(fmt.Sprintf("Staging file cache enabled with max %d entries", StagingCacheMaxEntries), nil)
 }
 
 // check that we can create / open the log file
