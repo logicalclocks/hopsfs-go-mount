@@ -477,17 +477,6 @@ func (c *StagingFileCache) startStatsReporter(interval time.Duration) {
 	}()
 }
 
-// hitRatio returns the current cache hit ratio as a percentage.
-func (c *StagingFileCache) hitRatio() float64 {
-	hits := c.globalHits.Load()
-	misses := c.globalMisses.Load()
-	total := hits + misses
-	if total == 0 {
-		return 0
-	}
-	return float64(hits) / float64(total) * 100
-}
-
 func (c *StagingFileCache) updateDiskUsageFlag() {
 	excessBytes, err := diskUsageExcess(StagingDir, StagingCacheMaxDiskUsage)
 	if err != nil {

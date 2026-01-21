@@ -81,7 +81,7 @@ func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	flag.StringVar(&UserUmask, "umask", "", "Umask for the file system. Must be a 4 digit octal number.")
 	flag.Int64Var(&StagingCacheMaxFileSize, "stagingCacheMaxFileSize", 256*1024*1024, "Max file size in bytes to cache locally (default: 256MB)")
 	flag.Int64Var(&StagingCacheMaxDownloadSize, "stagingCacheMaxDownloadSize", 1*1024*1024, "Max file size in bytes to download for caching (default: 1MB)")
-	flag.Float64Var(&StagingCacheMaxDiskUsage, "stagingCacheMaxDiskUsage", 0.60, "Max disk usage ratio for caching staging files (0.0-1.0, default: 0.60)")
+	flag.Float64Var(&StagingCacheMaxDiskUsage, "stagingCacheMaxDiskUsage", 0.60, "Max disk usage ratio for caching staging files (0.0-0.8, default: 0.60)")
 	flag.IntVar(&StagingCacheMaxEntries, "stagingCacheMaxEntries", 10240, "Max staging files to cache locally (0 to disable)")
 	flag.DurationVar(&StagingCacheDiskUsageCheckInterval, "stagingCacheDiskCheckInterval", 1*time.Second, "Interval for checking disk usage for cache eviction (default: 1s)")
 	flag.DurationVar(&StagingCacheStatsReportingInterval, "stagingCacheStatsReportingInterval", 0, "Interval for cache hit ratio reporting (0 to disable, e.g., 1m for every minute)")
