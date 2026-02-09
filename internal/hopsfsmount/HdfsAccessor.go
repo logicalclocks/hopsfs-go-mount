@@ -168,7 +168,12 @@ func (dfs *HdfsAccessorImpl) OpenRead(path string) (ReadSeekCloser, error) {
 			return nil, unwrapAndTranslateError(err)
 		}
 	}
+
+	startTime := time.Now()
 	reader, err := dfs.MetadataClient.Open(path)
+	duration := time.Since(startTime)
+
+	logger.Debug("Backend OpenRead", logger.Fields{Operation: Open, Path: path, Duration: fmt.Sprintf("%.3fms", duration.Seconds()*1000)})
 	if err != nil {
 		return nil, unwrapAndTranslateError(err)
 	}
@@ -191,7 +196,11 @@ func (dfs *HdfsAccessorImpl) CreateFile(path string, mode os.FileMode, overwrite
 		return nil, unwrapAndTranslateError(err)
 	}
 
+	startTime := time.Now()
 	writer, err := dfs.MetadataClient.CreateFile(path, serverDefaults.Replication, serverDefaults.BlockSize, mode, overwrite, false)
+	duration := time.Since(startTime)
+
+	logger.Debug("Backend CreateFile", logger.Fields{Operation: Create, Path: path, Duration: fmt.Sprintf("%.3fms", duration.Seconds()*1000)})
 	if err != nil {
 		return nil, unwrapAndTranslateError(err)
 	}
@@ -238,8 +247,12 @@ func (dfs *HdfsAccessorImpl) Stat(path string) (Attrs, error) {
 		}
 	}
 
+	startTime := time.Now()
 	fileInfo, err := dfs.MetadataClient.Stat(path)
+	duration := time.Since(startTime)
+
 	if err != nil {
+		logger.Debug("Backend Stat failed", logger.Fields{Operation: "stat", Path: path, Duration: fmt.Sprintf("%.3fms", duration.Seconds()*1000), Error: err})
 		if IsSuccessOrNonRetriableError(err) {
 			// benign error (e.g. path not found)
 			return Attrs{}, unwrapAndTranslateError(err)
@@ -249,6 +262,7 @@ func (dfs *HdfsAccessorImpl) Stat(path string) (Attrs, error) {
 		dfs.MetadataClient = nil
 		return Attrs{}, unwrapAndTranslateError(err)
 	}
+	logger.Debug("Backend Stat success", logger.Fields{Operation: "stat", Path: path, Duration: fmt.Sprintf("%.3fms", duration.Seconds()*1000)})
 	return dfs.attrsFromFileInfo(fileInfo), nil
 }
 
@@ -425,7 +439,12 @@ func (dfs *HdfsAccessorImpl) Mkdir(path string, mode os.FileMode) error {
 			return unwrapAndTranslateError(err)
 		}
 	}
+
+	startTime := time.Now()
 	err := dfs.MetadataClient.Mkdir(path, mode)
+	duration := time.Since(startTime)
+
+	logger.Debug("Backend Mkdir", logger.Fields{Operation: Mkdir, Path: path, Duration: fmt.Sprintf("%.3fms", duration.Seconds()*1000)})
 	return unwrapAndTranslateError(err)
 }
 
@@ -439,7 +458,12 @@ func (dfs *HdfsAccessorImpl) Remove(path string) error {
 			return unwrapAndTranslateError(err)
 		}
 	}
+
+	startTime := time.Now()
 	err := dfs.MetadataClient.Remove(path)
+	duration := time.Since(startTime)
+
+	logger.Debug("Backend Remove", logger.Fields{Operation: Remove, Path: path, Duration: fmt.Sprintf("%.3fms", duration.Seconds()*1000)})
 	return unwrapAndTranslateError(err)
 }
 
@@ -453,7 +477,12 @@ func (dfs *HdfsAccessorImpl) Rename(oldPath string, newPath string) error {
 			return unwrapAndTranslateError(err)
 		}
 	}
+
+	startTime := time.Now()
 	err := dfs.MetadataClient.Rename(oldPath, newPath)
+	duration := time.Since(startTime)
+
+	logger.Debug("Backend Rename", logger.Fields{Operation: Rename, From: oldPath, To: newPath, Duration: fmt.Sprintf("%.3fms", duration.Seconds()*1000)})
 	return unwrapAndTranslateError(err)
 }
 
@@ -467,7 +496,12 @@ func (dfs *HdfsAccessorImpl) Rename2(oldPath string, newPath string, options hdf
 			return unwrapAndTranslateError(err)
 		}
 	}
+
+	startTime := time.Now()
 	err := dfs.MetadataClient.Rename2(oldPath, newPath, options)
+	duration := time.Since(startTime)
+
+	logger.Debug("Backend Rename2", logger.Fields{Operation: Rename2, From: oldPath, To: newPath, Duration: fmt.Sprintf("%.3fms", duration.Seconds()*1000)})
 	return unwrapAndTranslateError(err)
 }
 
@@ -481,7 +515,12 @@ func (dfs *HdfsAccessorImpl) Chmod(path string, mode os.FileMode) error {
 			return unwrapAndTranslateError(err)
 		}
 	}
+
+	startTime := time.Now()
 	err := dfs.MetadataClient.Chmod(path, mode)
+	duration := time.Since(startTime)
+
+	logger.Debug("Backend Chmod", logger.Fields{Operation: Chmod, Path: path, Mode: mode, Duration: fmt.Sprintf("%.3fms", duration.Seconds()*1000)})
 	return unwrapAndTranslateError(err)
 }
 
@@ -495,7 +534,12 @@ func (dfs *HdfsAccessorImpl) Chown(path string, user, group string) error {
 			return unwrapAndTranslateError(err)
 		}
 	}
+
+	startTime := time.Now()
 	err := dfs.MetadataClient.Chown(path, user, group)
+	duration := time.Since(startTime)
+
+	logger.Debug("Backend Chown", logger.Fields{Operation: Chown, Path: path, User: user, Group: group, Duration: fmt.Sprintf("%.3fms", duration.Seconds()*1000)})
 	return unwrapAndTranslateError(err)
 }
 
