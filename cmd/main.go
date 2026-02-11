@@ -22,6 +22,11 @@ func main() {
 	retryPolicy := hopsfsmount.NewDefaultRetryPolicy(hopsfsmount.WallClock{})
 	hopsfsmount.ParseArgsAndInitLogger(retryPolicy)
 
+	// Initialize connection username once at startup
+	if err := hopsfsmount.InitConnectionUser(); err != nil {
+		logger.Fatal(fmt.Sprintf("Failed to initialize connection user: %v", err), nil)
+	}
+
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 

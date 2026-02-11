@@ -230,7 +230,7 @@ func (dir *DirINode) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node
 	userName, err := getUserName(req.Uid)
 	if err != nil {
 		logger.Error("Unable to find user information. ", logger.Fields{Operation: Mkdir,
-			Path: dir.AbsolutePathForChild(req.Name), UID: req.Uid, HopsFSUserName: ForceOverrideUsername})
+			Path: dir.AbsolutePathForChild(req.Name), UID: req.Uid, HopsFSUserName: GetConnectionUser()})
 		return nil, err
 	}
 
@@ -242,21 +242,12 @@ func (dir *DirINode) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node
 		return nil, err
 	}
 	req.Mode = ComputePermissions(req.Mode)
-	err = dir.FileSystem.getDFSConnector().Mkdir(dir.AbsolutePathForChild(req.Name), req.Mode)
+	err = dir.FileSystem.getDFSConnector().MkdirWithGroup(dir.AbsolutePathForChild(req.Name), req.Mode, groupName)
 	if err != nil {
 		logger.Info("mkdir failed", logger.Fields{Operation: Mkdir, Path: path.Join(dir.AbsolutePath(), req.Name), Error: err})
 		return nil, err
 	}
-	logger.Debug("mkdir successful", logger.Fields{Operation: Mkdir, Path: path.Join(dir.AbsolutePath(), req.Name)})
-
-	err = ChownOp(dir.FileSystem, dir.AbsolutePathForChild(req.Name), userName, groupName)
-	if err != nil {
-		logger.Warn("Unable to change ownership of new dir", logger.Fields{Operation: Create, Path: dir.AbsolutePathForChild(req.Name),
-			UID: req.Uid, GID: req.Gid, Error: err})
-		//unable to change the ownership of the directory. so delete it as the operation as a whole failed
-		dir.FileSystem.getDFSConnector().Remove(dir.AbsolutePathForChild(req.Name))
-		return nil, err
-	}
+	logger.Debug("mkdir successful with group", logger.Fields{Operation: Mkdir, Path: path.Join(dir.AbsolutePath(), req.Name), Group: groupName})
 
 	newInode := dir.addOrUpdateChildInodeAttrs(Mkdir, req.Name,
 		Attrs{
@@ -282,7 +273,7 @@ func (dir *DirINode) Create(ctx context.Context, req *fuse.CreateRequest, resp *
 	userName, err := getUserName(req.Uid)
 	if err != nil {
 		logger.Error("Unable to find user information. ", logger.Fields{Operation: Create,
-			Path: dir.AbsolutePathForChild(req.Name), UID: req.Uid, HopsFSUserName: ForceOverrideUsername})
+			Path: dir.AbsolutePathForChild(req.Name), UID: req.Uid, HopsFSUserName: GetConnectionUser()})
 		return nil, nil, err
 	}
 
@@ -311,15 +302,13 @@ func (dir *DirINode) Create(ctx context.Context, req *fuse.CreateRequest, resp *
 		return nil, nil, err
 	}
 	// Note: handle is already added to activeHandles inside NewFileHandle
-	err = ChownOp(dir.FileSystem, dir.AbsolutePathForChild(req.Name), userName, groupName)
-	if err != nil {
-		logger.Warn("Unable to change ownership of new file", logger.Fields{Operation: Create, Path: dir.AbsolutePathForChild(req.Name),
-			UID: req.Uid, GID: req.Gid, Error: err})
-		//unable to change the ownership of the file. so delete it as the operation as a whole failed
-		dir.FileSystem.getDFSConnector().Remove(dir.AbsolutePathForChild(req.Name))
-		dir.removeChildInode(Create, req.Name)
-		return nil, nil, err
-	}
+	// File created with groupname parameter - no chown needed
+	logger.Debug("File created with group", logger.Fields{
+		Operation: Create,
+		Path:      dir.AbsolutePathForChild(req.Name),
+		User:      userName,
+		Group:     groupName,
+	})
 
 	//update the attributes of the file now
 	_, err = dir.statInodeInHopsFS(Create, file.Attrs.Name, &file.Attrs)

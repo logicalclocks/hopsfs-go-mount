@@ -28,10 +28,13 @@ type HdfsAccessor interface {
 	OpenRead(path string) (ReadSeekCloser, error) // Opens HDFS file for reading
 	CreateFile(path string,
 		mode os.FileMode, overwrite bool) (HdfsWriter, error) // Opens HDFS file for writing
+	CreateFileWithGroup(path string,
+		mode os.FileMode, overwrite bool, groupname string) (HdfsWriter, error) // Opens HDFS file for writing with specific group
 	ReadDir(path string) ([]Attrs, error)        // Enumerates HDFS directory
 	Stat(path string) (Attrs, error)             // Retrieves file/directory attributes
 	StatFs() (FsInfo, error)                     // Retrieves HDFS usage
 	Mkdir(path string, mode os.FileMode) error   // Creates a directory
+	MkdirWithGroup(path string, mode os.FileMode, groupname string) error // Creates a directory with specific group
 	Remove(path string) error                    // Removes a file or directory
 	Rename(oldPath string, newPath string) error // Renames a file or directory
 	Rename2(oldPath string, newPath string,
@@ -104,22 +107,6 @@ func (dfs *HdfsAccessorImpl) connectToNameNode() (*hdfs.Client, error) {
 
 // Performs an attempt to connect to the HDFS name
 func (dfs *HdfsAccessorImpl) connectToNameNodeImpl() (*hdfs.Client, error) {
-
-	if ForceOverrideUsername != "" {
-		hadoopUserName = ForceOverrideUsername
-	} else {
-		hadoopUserName = os.Getenv("HADOOP_USER_NAME")
-		if hadoopUserName == "" {
-			currentSystemUser, err := ugcache.CurrentUserName()
-			if err != nil {
-				return nil, err
-			}
-			hadoopUserName = currentSystemUser
-		}
-	}
-
-	hadoopUserID = ugcache.LookupUId(hadoopUserName)
-
 	logger.Info(fmt.Sprintf("Connecting as user: %s UID: %d", hadoopUserName, hadoopUserID), nil)
 
 	// Performing an attempt to connect to the name node
@@ -182,6 +169,11 @@ func (dfs *HdfsAccessorImpl) OpenRead(path string) (ReadSeekCloser, error) {
 
 // Creates new HDFS file
 func (dfs *HdfsAccessorImpl) CreateFile(path string, mode os.FileMode, overwrite bool) (HdfsWriter, error) {
+	return dfs.CreateFileWithGroup(path, mode, overwrite, "")
+}
+
+// Creates new HDFS file with specific group
+func (dfs *HdfsAccessorImpl) CreateFileWithGroup(path string, mode os.FileMode, overwrite bool, groupname string) (HdfsWriter, error) {
 	dfs.lockHadoopClient()
 	defer dfs.unlockHadoopClient()
 
@@ -197,10 +189,15 @@ func (dfs *HdfsAccessorImpl) CreateFile(path string, mode os.FileMode, overwrite
 	}
 
 	startTime := time.Now()
-	writer, err := dfs.MetadataClient.CreateFile(path, serverDefaults.Replication, serverDefaults.BlockSize, mode, overwrite, false)
+	var writer *hdfs.FileWriter
+	if groupname != "" {
+		writer, err = dfs.MetadataClient.CreateFileWithGroup(path, serverDefaults.Replication, serverDefaults.BlockSize, mode, overwrite, false, groupname)
+	} else {
+		writer, err = dfs.MetadataClient.CreateFile(path, serverDefaults.Replication, serverDefaults.BlockSize, mode, overwrite, false)
+	}
 	duration := time.Since(startTime)
 
-	logger.Debug("Backend CreateFile", logger.Fields{Operation: Create, Path: path, Duration: fmt.Sprintf("%.3fms", duration.Seconds()*1000)})
+	logger.Debug("Backend CreateFile", logger.Fields{Operation: Create, Path: path, Group: groupname, Duration: fmt.Sprintf("%.3fms", duration.Seconds()*1000)})
 	if err != nil {
 		return nil, unwrapAndTranslateError(err)
 	}
@@ -431,6 +428,11 @@ func isNonRetriableError(err error) bool {
 
 // Creates a directory
 func (dfs *HdfsAccessorImpl) Mkdir(path string, mode os.FileMode) error {
+	return dfs.MkdirWithGroup(path, mode, "")
+}
+
+// Creates a directory with specific group
+func (dfs *HdfsAccessorImpl) MkdirWithGroup(path string, mode os.FileMode, groupname string) error {
 	dfs.lockHadoopClient()
 	defer dfs.unlockHadoopClient()
 
@@ -441,10 +443,15 @@ func (dfs *HdfsAccessorImpl) Mkdir(path string, mode os.FileMode) error {
 	}
 
 	startTime := time.Now()
-	err := dfs.MetadataClient.Mkdir(path, mode)
+	var err error
+	if groupname != "" {
+		err = dfs.MetadataClient.MkdirWithGroup(path, mode, groupname)
+	} else {
+		err = dfs.MetadataClient.Mkdir(path, mode)
+	}
 	duration := time.Since(startTime)
 
-	logger.Debug("Backend Mkdir", logger.Fields{Operation: Mkdir, Path: path, Duration: fmt.Sprintf("%.3fms", duration.Seconds()*1000)})
+	logger.Debug("Backend Mkdir", logger.Fields{Operation: Mkdir, Path: path, Group: groupname, Duration: fmt.Sprintf("%.3fms", duration.Seconds()*1000)})
 	return unwrapAndTranslateError(err)
 }
 
@@ -562,4 +569,30 @@ func (dfs *HdfsAccessorImpl) lockHadoopClient() {
 
 func (dfs *HdfsAccessorImpl) unlockHadoopClient() {
 	dfs.MetadataClientMutex.Unlock()
+}
+
+// GetConnectionUser returns the username used to connect to HDFS
+func GetConnectionUser() string {
+	return hadoopUserName
+}
+
+// InitConnectionUser initializes the global hadoopUserName variable based on configuration
+// Should be called once at application startup after command-line flags are parsed
+func InitConnectionUser() error {
+	if ForceOverrideUsername != "" {
+		hadoopUserName = ForceOverrideUsername
+	} else {
+		hadoopUserName = os.Getenv("HADOOP_USER_NAME")
+		if hadoopUserName == "" {
+			currentSystemUser, err := ugcache.CurrentUserName()
+			if err != nil {
+				return err
+			}
+			hadoopUserName = currentSystemUser
+		}
+	}
+
+	hadoopUserID = ugcache.LookupUId(hadoopUserName)
+	logger.Info(fmt.Sprintf("Initialized connection user: %s UID: %d", hadoopUserName, hadoopUserID), nil)
+	return nil
 }

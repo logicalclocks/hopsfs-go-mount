@@ -233,7 +233,7 @@ func (file *FileINode) flushAttempt(operation string) error {
 		logger.Warn("Unable to delete the file during flush.", file.logInfo(logger.Fields{Operation: operation, Error: err}))
 	}
 
-	w, err := hdfsAccessor.CreateFile(file.AbsolutePath(), file.Attrs.Mode, true)
+	w, err := hdfsAccessor.CreateFileWithGroup(file.AbsolutePath(), file.Attrs.Mode, true, file.Attrs.DFSGroupName)
 	if err != nil {
 		logger.Error("Error creating file in DFS", file.logInfo(logger.Fields{Operation: operation, Error: err}))
 		return err
@@ -409,12 +409,12 @@ func (file *FileINode) createStagingFile(operation string, existsInDFS bool) (*o
 	absPath := file.AbsolutePath()
 	hdfsAccessor := file.FileSystem.getDFSConnector()
 	if !existsInDFS { // it  is a new file so create it in the DFS
-		w, err := hdfsAccessor.CreateFile(absPath, ComputePermissions(file.Attrs.Mode), false)
+		w, err := hdfsAccessor.CreateFileWithGroup(absPath, ComputePermissions(file.Attrs.Mode), false, file.Attrs.DFSGroupName)
 		if err != nil {
 			logger.Error("Failed to create file in DFS", file.logInfo(logger.Fields{Operation: operation, Error: err}))
 			return nil, err
 		}
-		logger.Info("Created an empty file in DFS", file.logInfo(logger.Fields{Operation: operation}))
+		logger.Info("Created an empty file in DFS with group", file.logInfo(logger.Fields{Operation: operation, Group: file.Attrs.DFSGroupName}))
 		w.Close()
 	} else {
 		// Request to write to existing file - stat to verify it exists and get metadata

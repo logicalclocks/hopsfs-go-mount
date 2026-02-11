@@ -57,6 +57,12 @@ func (fta *FaultTolerantHdfsAccessor) CreateFile(path string, mode os.FileMode, 
 	return fta.Impl.CreateFile(path, mode, overwrite)
 }
 
+// Opens HDFS file for writing with specific group
+func (fta *FaultTolerantHdfsAccessor) CreateFileWithGroup(path string, mode os.FileMode, overwrite bool, groupname string) (HdfsWriter, error) {
+	// TODO: implement fault-tolerance. For now re-try-loop is implemented inside FileHandleWriter
+	return fta.Impl.CreateFileWithGroup(path, mode, overwrite, groupname)
+}
+
 // Enumerates HDFS directory
 func (fta *FaultTolerantHdfsAccessor) ReadDir(path string) ([]Attrs, error) {
 	op := fta.RetryPolicy.StartOperation()
@@ -105,6 +111,20 @@ func (fta *FaultTolerantHdfsAccessor) Mkdir(path string, mode os.FileMode) error
 	for {
 		err := fta.Impl.Mkdir(path, mode)
 		if IsSuccessOrNonRetriableError(err) || !op.ShouldRetry("[%s] Mkdir %s: %s", path, mode, err) {
+			return err
+		} else {
+			// Clean up the bad connection, to let underline connection to get automatic refresh
+			fta.Impl.Close()
+		}
+	}
+}
+
+// Creates a directory with specific group
+func (fta *FaultTolerantHdfsAccessor) MkdirWithGroup(path string, mode os.FileMode, groupname string) error {
+	op := fta.RetryPolicy.StartOperation()
+	for {
+		err := fta.Impl.MkdirWithGroup(path, mode, groupname)
+		if IsSuccessOrNonRetriableError(err) || !op.ShouldRetry("[%s] MkdirWithGroup %s (group=%s): %s", path, mode, groupname, err) {
 			return err
 		} else {
 			// Clean up the bad connection, to let underline connection to get automatic refresh

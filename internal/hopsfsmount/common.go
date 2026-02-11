@@ -35,7 +35,7 @@ func SetAttrChownOp(attrs *Attrs, fileSystem *FileSystem, path string, req *fuse
 		userName, err = getUserName(req.Uid)
 		if err != nil {
 			logger.Error("Unable to find user information. ", logger.Fields{Operation: Setattr,
-				Path: path, UID: req.Uid, HopsFSUserName: ForceOverrideUsername})
+				Path: path, UID: req.Uid, HopsFSUserName: GetConnectionUser()})
 			return err
 		}
 	}
@@ -74,7 +74,7 @@ func ChownOp(fileSystem *FileSystem, path string, userName string, groupName str
 func getUserName(uid uint32) (string, error) {
 	var userName = ""
 	if ForceOverrideUsername != "" {
-		userName = ForceOverrideUsername
+		userName = GetConnectionUser()
 	} else {
 		userName = ugcache.LookupUserName(uid)
 	}
