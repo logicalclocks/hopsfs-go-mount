@@ -23,6 +23,8 @@ Options:
         Client key location (default "/srv/hops/super_crypto/hdfs/hdfs_priv.pem")
   -delaySyncUntilClose
         Delay sync/flush operations until file close (default true)
+  -enableDefaultPermissions
+        Enable FUSE default_permissions option. If disabled, permissions are not checked by kernel and only checked on server side (default true)
   -enablePageCache
         Enable Linux Page Cache
   -fallBackGroup string
