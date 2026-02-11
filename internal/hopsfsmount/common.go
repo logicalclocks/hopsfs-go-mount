@@ -7,6 +7,7 @@ import (
 	"os"
 	"syscall"
 	"time"
+	"fmt"
 
 	"bazil.org/fuse"
 	"hopsworks.ai/hopsfsmount/internal/hopsfsmount/logger"
@@ -14,6 +15,10 @@ import (
 )
 
 func ChmodOp(attrs *Attrs, fileSystem *FileSystem, path string, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
+	if attrs.Mode == req.Mode {
+		logger.Debug(fmt.Sprintf("Skipping chmod, mode already %v", req.Mode), logger.Fields{Operation: Chmod, Path: path})
+		return nil
+	}
 	logger.Info("Setting attributes", logger.Fields{Operation: Chmod, Path: path, Mode: req.Mode})
 	err := fileSystem.getDFSConnector().Chmod(path, req.Mode)
 	if err != nil {
