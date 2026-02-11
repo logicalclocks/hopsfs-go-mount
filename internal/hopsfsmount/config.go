@@ -39,6 +39,7 @@ var UseGroupFromHopsFsDatasetPath bool = false
 var AllowOther bool = false
 var HopfsProjectDatasetGroupRegex = regexp.MustCompile(`/*Projects/(?P<projectName>\w+)/(?P<datasetName>\w+)/\/*`)
 var EnablePageCache = false
+var EnableDefaultPermissions = true
 var CacheAttrsTimeSecs = 5
 var FallBackUser = "root"
 var FallBackGroup = "root"
@@ -75,6 +76,7 @@ func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	flag.BoolVar(&AllowOther, "allowOther", true, "Allow other users to use the filesystem")
 	flag.BoolVar(&Version, "version", false, "Print version")
 	flag.BoolVar(&EnablePageCache, "enablePageCache", false, "Enable Linux Page Cache")
+	flag.BoolVar(&EnableDefaultPermissions, "enableDefaultPermissions", true, "Enable FUSE default_permissions option. If disabled, permissions are not checked by kernel and only checked on server side")
 	flag.IntVar(&CacheAttrsTimeSecs, "cacheAttrsTimeSecs", 5, "Cache INodes' Attrs. Set to 0 to disable caching INode attrs.")
 	flag.StringVar(&FallBackUser, "fallBackUser", "root", "Local user name if the DFS user is not found on the local file system")
 	flag.StringVar(&FallBackGroup, "fallBackGroup", "root", "Local group name if the DFS group is not found on the local file system.")
@@ -200,7 +202,10 @@ func GetMountOptions(ro bool) []fuse.MountOption {
 	mountOptions := []fuse.MountOption{fuse.FSName("hopsfs"),
 		fuse.Subtype("hopsfs"),
 		fuse.MaxReadahead(1024 * 64), //TODO: make configurable
-		fuse.DefaultPermissions(),
+	}
+
+	if EnableDefaultPermissions {
+		mountOptions = append(mountOptions, fuse.DefaultPermissions())
 	}
 
 	if EnablePageCache {
