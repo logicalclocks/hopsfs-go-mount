@@ -46,7 +46,7 @@ const (
 	Holes                         = "holes"
 	SeekToStart                   = "seek_to_start"
 	CacheHits                     = "cache_hits"
-	cache                         = "cache"
+	Cache                         = "stage_file_cache"
 	TmpFile                       = "tmp_file"
 	Archive                       = "zip_file"
 	Error                         = "error"

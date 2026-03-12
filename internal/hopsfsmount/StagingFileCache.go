@@ -99,7 +99,7 @@ func (c *StagingFileCache) Get(hdfsPath string, upstreamSize int64, upstreamMtim
 			c.globalMisses.Add(1)
 		}
 		logger.Debug("Cache miss for staging file", logger.Fields{
-			Operation: cache,
+			Operation: Cache,
 			Path:      hdfsPath,
 		})
 		return nil, false
@@ -113,7 +113,7 @@ func (c *StagingFileCache) Get(hdfsPath string, upstreamSize int64, upstreamMtim
 		}
 		logger.Debug(fmt.Sprintf("Cached staging file is stale, invalidating. cached[size=%d, mtime=%v] upstream[size=%d, mtime=%v]",
 			entry.size, entry.mtime, upstreamSize, upstreamMtime), logger.Fields{
-			Operation: cache,
+			Operation: Cache,
 			Path:      hdfsPath,
 		})
 		c.removeEntry(hdfsPath)
@@ -133,7 +133,7 @@ func (c *StagingFileCache) Get(hdfsPath string, upstreamSize int64, upstreamMtim
 	_, _ = handle.Seek(0, 0)
 
 	logger.Debug("Cache hit for staging file", logger.Fields{
-		Operation: cache,
+		Operation: Cache,
 		Path:      hdfsPath,
 		CacheHits: hitCount,
 	})
@@ -188,7 +188,7 @@ func (c *StagingFileCache) Put(hdfsPath string, handle *os.File, size int64, mti
 	}
 
 	logger.Debug("Added staging file to cache", logger.Fields{
-		Operation: cache,
+		Operation: Cache,
 		Path:      hdfsPath,
 		FileSize:  size,
 		Entries:   len(c.entries),
@@ -215,7 +215,7 @@ func (c *StagingFileCache) Rename(oldPath, newPath string) {
 	if !ok {
 		// No cache entry for old path, nothing to transfer
 		logger.Debug("Cache rename: no entry for old path", logger.Fields{
-			Operation: cache,
+			Operation: Cache,
 			From:      oldPath,
 			To:        newPath,
 		})
@@ -242,7 +242,7 @@ func (c *StagingFileCache) Rename(oldPath, newPath string) {
 	c.lruList.MoveToFront(entry.lruElement)
 
 	logger.Debug("Cache entry renamed", logger.Fields{
-		Operation: cache,
+		Operation: Cache,
 		From:      oldPath,
 		To:        newPath,
 	})
@@ -293,7 +293,7 @@ func (c *StagingFileCache) removeEntry(hdfsPath string) {
 	}
 
 	logger.Debug("Removed staging file from cache", logger.Fields{
-		Operation: cache,
+		Operation: Cache,
 		Path:      hdfsPath,
 		CacheHits: hitCount,
 	})
@@ -327,7 +327,7 @@ func (c *StagingFileCache) Clear() {
 	}
 
 	logger.Debug("Cleared staging file cache", logger.Fields{
-		Operation: cache,
+		Operation: Cache,
 	})
 }
 
@@ -369,7 +369,7 @@ func (c *StagingFileCache) GetAndResetStats() CacheStats {
 func (c *StagingFileCache) ShouldCache(fileSize int64, path string, applyDownloadLimit bool) bool {
 	if applyDownloadLimit && StagingCacheMaxDownloadSize > 0 && fileSize > StagingCacheMaxDownloadSize {
 		logger.Debug("File too large for download caching", logger.Fields{
-			Operation: cache,
+			Operation: Cache,
 			Path:      path,
 			FileSize:  fileSize,
 		})
@@ -379,7 +379,7 @@ func (c *StagingFileCache) ShouldCache(fileSize int64, path string, applyDownloa
 	// Check if file exceeds max cacheable size
 	if StagingCacheMaxFileSize > 0 && fileSize > StagingCacheMaxFileSize {
 		logger.Debug("File too large for caching", logger.Fields{
-			Operation: cache,
+			Operation: Cache,
 			Path:      path,
 			FileSize:  fileSize,
 		})
@@ -388,7 +388,7 @@ func (c *StagingFileCache) ShouldCache(fileSize int64, path string, applyDownloa
 
 	if c.diskUsageExceeded.Load() {
 		logger.Debug("Disk usage too high for caching", logger.Fields{
-			Operation: cache,
+			Operation: Cache,
 			Path:      path,
 		})
 		return false
@@ -401,7 +401,7 @@ func (c *StagingFileCache) discardHandle(hdfsPath string, handle *os.File) {
 	localPath := handle.Name()
 	if err := handle.Close(); err != nil {
 		logger.Warn("Failed to close staging file handle", logger.Fields{
-			Operation: cache,
+			Operation: Cache,
 			Path:      hdfsPath,
 			Error:     err,
 		})
@@ -412,7 +412,7 @@ func (c *StagingFileCache) discardHandle(hdfsPath string, handle *os.File) {
 	if localPath != "" {
 		if err := os.Remove(localPath); err != nil && !os.IsNotExist(err) {
 			logger.Warn("Failed to remove staging file", logger.Fields{
-				Operation: cache,
+				Operation: Cache,
 				Path:      hdfsPath,
 				TmpFile:   localPath,
 				Error:     err,
@@ -468,7 +468,7 @@ func (c *StagingFileCache) startStatsReporter(interval time.Duration) {
 				logger.Info(fmt.Sprintf(
 					"Cache stats: hits=%d, misses=%d, hit_ratio=%.1f%%, cached_files=%d, cached_bytes=%d",
 					stats.Hits, stats.Misses, hitRatio, stats.Entries, stats.Bytes), logger.Fields{
-					Operation: cache,
+					Operation: Cache,
 				})
 			case <-c.monitorStop:
 				return
@@ -481,7 +481,7 @@ func (c *StagingFileCache) updateDiskUsageFlag() {
 	excessBytes, err := diskUsageExcess(StagingDir, StagingCacheMaxDiskUsage)
 	if err != nil {
 		logger.Warn("Failed to check disk usage for caching", logger.Fields{
-			Operation: cache,
+			Operation: Cache,
 			Path:      StagingDir,
 			Error:     err,
 		})
@@ -559,7 +559,7 @@ func (c *StagingFileCache) GetOrLoad(file *FileINode, hdfsAccessor HdfsAccessor,
 		upstreamInfo, err := hdfsAccessor.Stat(absPath)
 		if err != nil {
 			logger.Warn("Failed to stat file for cache validation, skipping cache", logger.Fields{
-				Operation: cache,
+				Operation: Cache,
 				Path:      absPath,
 				Error:     err,
 			})
@@ -578,7 +578,7 @@ func (c *StagingFileCache) GetOrLoad(file *FileINode, hdfsAccessor HdfsAccessor,
 			c.globalMisses.Add(1)
 		}
 		logger.Debug("Cache miss for staging file", logger.Fields{
-			Operation: cache,
+			Operation: Cache,
 			Path:      absPath,
 		})
 	}

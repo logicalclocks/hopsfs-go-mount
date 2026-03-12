@@ -54,6 +54,13 @@ func SetAttrChownOp(attrs *Attrs, fileSystem *FileSystem, path string, req *fuse
 		}
 	}
 
+	// Skip chown if owner and group already match (avoids unnecessary backend RPC)
+	if userName == attrs.DFSUserName && groupName == attrs.DFSGroupName {
+		logger.Debug(fmt.Sprintf("Skipping chown, owner %s and group %s already match", userName, groupName),
+			logger.Fields{Operation: Chown, Path: path})
+		return nil
+	}
+
 	err = ChownOp(fileSystem, path, userName, groupName)
 	if err != nil {
 		return err
