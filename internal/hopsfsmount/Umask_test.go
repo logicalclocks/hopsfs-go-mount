@@ -98,7 +98,7 @@ func TestUmaskBasedPermissions(t *testing.T) {
 			if tc.Dir {
 				expected = tc.ExpectedFilePermission | os.ModeDir
 			}
-			hdfsAccessor.EXPECT().Mkdir(testFile, expected).Return(nil).AnyTimes()
+			hdfsAccessor.EXPECT().MkdirWithGroup(testFile, expected, gomock.Any()).Return(nil).AnyTimes()
 			fs, _ := NewFileSystem([]HdfsAccessor{hdfsAccessor}, "/", []string{"*"}, false, DelaySyncUntilClose, NewDefaultRetryPolicy(mockClock), mockClock)
 			root, _ := fs.Root()
 			defaultPermissions := tc.DefaultPermissions

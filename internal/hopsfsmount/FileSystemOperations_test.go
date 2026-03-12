@@ -329,7 +329,7 @@ func TestSeekSmallFile(t *testing.T) {
 
 func seekTest(t *testing.T, dataSize int, diskSeekTestFile string, dfsSeekTestFile string) {
 	addresses := make([]string, 1)
-	addresses[0] = "localhost:8020"
+	addresses[0] = "127.0.0.1:8020"
 
 	user, err := ugcache.CurrentUserName()
 	if err != nil {
@@ -607,7 +607,10 @@ func withMount(t testing.TB, srcDir string, delaySyncUntilClose bool, fn func(mn
 	retryPolicy := NewDefaultRetryPolicy(WallClock{})
 	retryPolicy.MaxAttempts = 1 // for quick failure
 	logger.InitLogger("ERROR", false, "")
-	hdfsAccessor, _ := NewHdfsAccessor("localhost:8020", WallClock{}, TLSConfig{TLS: false, RootCABundle: RootCABundle, ClientCertificate: ClientCertificate, ClientKey: ClientKey})
+	if err := InitConnectionUser(); err != nil {
+		t.Fatalf("Error/InitConnectionUser: %v", err)
+	}
+	hdfsAccessor, _ := NewHdfsAccessor("127.0.0.1:8020", WallClock{}, TLSConfig{TLS: false, RootCABundle: RootCABundle, ClientCertificate: ClientCertificate, ClientKey: ClientKey})
 	err := hdfsAccessor.EnsureConnected()
 	if err != nil {
 		t.Fatalf(fmt.Sprintf("Error/NewHdfsAccessor: %v ", err), nil)
