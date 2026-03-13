@@ -44,12 +44,13 @@ type FileINode struct {
 	Attrs      Attrs       // Cache of file attributes // TODO: implement TTL
 	Parent     *DirINode   // Pointer to the parent directory (allows computing fully-qualified paths on demand)
 
-	activeHandles   []*FileHandle // list of opened file handles
-	fileMutex       sync.Mutex    // mutex for file metadata (Attrs)
-	fileProxy       FileProxy     // file proxy. Could be LocalRWFileProxy or RemoteFileProxy
-	fileHandleMutex sync.Mutex    // mutex for activeHandles slice and fileProxy lifecycle
-	dataMutex       sync.Mutex    // mutex for all I/O operations (read/write/truncate/flush) and isDirty flag
-	isDirty         bool          // tracks if file has unflushed writes (protected by dataMutex)
+	activeHandles    []*FileHandle // list of opened file handles
+	fileMutex        sync.Mutex    // mutex for file metadata (Attrs)
+	fileProxy        FileProxy     // file proxy. Could be LocalRWFileProxy or RemoteFileProxy
+	fileHandleMutex  sync.Mutex    // mutex for activeHandles slice and fileProxy lifecycle
+	dataMutex        sync.Mutex    // mutex for all I/O operations (read/write/truncate/flush) and isDirty flag
+	isDirty          bool          // tracks if file has unflushed writes (protected by dataMutex)
+	pendingDFSWriter HdfsWriter    // Writer from initial create, reused on first flush to avoid redundant Remove+Recreate
 }
 
 // Verify that *File implements necesary FUSE interfaces
@@ -149,6 +150,16 @@ func (file *FileINode) RemoveHandle(handle *FileHandle) {
 // close staging file
 // Called with fileHandleMutex held by RemoveHandle()
 func (file *FileINode) closeStaging() {
+	// If pending writer was never used (file created but never flushed, e.g. touch),
+	// close it now to complete the empty file in HDFS.
+	if file.pendingDFSWriter != nil {
+		err := file.pendingDFSWriter.Close()
+		if err != nil {
+			logger.Warn("Failed to close pending DFS writer", file.logInfo(logger.Fields{Operation: Close, Error: err}))
+		}
+		file.pendingDFSWriter = nil
+	}
+
 	if file.fileProxy != nil { // if not already closed
 		cached := false
 		// If caching is enabled and this is a LocalRWFileProxy, add to cache
@@ -223,24 +234,35 @@ func (file *FileINode) flushAttempt(operation string) error {
 	file.unlockFileHandles()
 
 	hdfsAccessor := file.FileSystem.getDFSConnector()
-	//delete the file and then rewrite.
-	//note we can not rely on the overwrite functionality of CreateFile API.
-	//For example if the file has permission set to 444 then we can not overwrite it
-	err := hdfsAccessor.Remove(file.AbsolutePath())
-	if err != nil {
-		// may be this is a retry and the file has already been deleted
-		// log error and continue
-		logger.Warn("Unable to delete the file during flush.", file.logInfo(logger.Fields{Operation: operation, Error: err}))
-	}
 
-	w, err := hdfsAccessor.CreateFileWithGroup(file.AbsolutePath(), file.Attrs.Mode, true, file.Attrs.DFSGroupName)
-	if err != nil {
-		logger.Error("Error creating file in DFS", file.logInfo(logger.Fields{Operation: operation, Error: err}))
-		return err
+	// If we have a pending writer from initial file creation, reuse it directly.
+	// This avoids the redundant Close+Remove+Recreate cycle for new files.
+	var w HdfsWriter
+	if file.pendingDFSWriter != nil {
+		w = file.pendingDFSWriter
+		file.pendingDFSWriter = nil
+		logger.Info("Reusing pending DFS writer from file creation", file.logInfo(logger.Fields{Operation: operation}))
+	} else {
+		// Retry path or subsequent flush: delete the file and recreate.
+		// We cannot rely on the overwrite functionality of CreateFile API.
+		// For example if the file has permission set to 444 then we can not overwrite it.
+		err := hdfsAccessor.Remove(file.AbsolutePath())
+		if err != nil {
+			// may be this is a retry and the file has already been deleted
+			// log error and continue
+			logger.Warn("Unable to delete the file during flush.", file.logInfo(logger.Fields{Operation: operation, Error: err}))
+		}
+
+		var createErr error
+		w, createErr = hdfsAccessor.CreateFileWithGroup(file.AbsolutePath(), file.Attrs.Mode, true, file.Attrs.DFSGroupName)
+		if createErr != nil {
+			logger.Error("Error creating file in DFS", file.logInfo(logger.Fields{Operation: operation, Error: createErr}))
+			return createErr
+		}
 	}
 
 	//open the file for reading and upload to DFS
-	err = lrwfp.SeekToStart()
+	err := lrwfp.SeekToStart()
 	if err != nil {
 		logger.Error("Unable to seek to the beginning of the temp file", file.logInfo(logger.Fields{Operation: operation, Error: err}))
 		return err
@@ -414,8 +436,10 @@ func (file *FileINode) createStagingFile(operation string, existsInDFS bool) (*o
 			logger.Error("Failed to create file in DFS", file.logInfo(logger.Fields{Operation: operation, Error: err}))
 			return nil, err
 		}
-		logger.Info("Created an empty file in DFS with group", file.logInfo(logger.Fields{Operation: operation, Group: file.Attrs.DFSGroupName}))
-		w.Close()
+		// Save the writer for reuse during first flush, avoiding the redundant
+		// Close+Remove+Recreate cycle. The writer will be used in flushAttempt().
+		file.pendingDFSWriter = w
+		logger.Info("Created file in DFS with group (writer kept open)", file.logInfo(logger.Fields{Operation: operation, Group: file.Attrs.DFSGroupName}))
 	} else {
 		// Request to write to existing file - stat to verify it exists and get metadata
 		upstreamInfo, err := hdfsAccessor.Stat(absPath)
