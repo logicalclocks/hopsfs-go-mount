@@ -149,17 +149,9 @@ func (file *FileINode) RemoveHandle(handle *FileHandle) {
 
 // close staging file
 // Called with fileHandleMutex held by RemoveHandle()
+// Note: pendingDFSWriter is always nil here — it is closed synchronously in
+// flushToDFS() (called from Flush) before Release/closeStaging runs.
 func (file *FileINode) closeStaging() {
-	// If pending writer was never used (file created but never flushed, e.g. touch),
-	// close it now to complete the empty file in HDFS.
-	if file.pendingDFSWriter != nil {
-		err := file.pendingDFSWriter.Close()
-		if err != nil {
-			logger.Warn("Failed to close pending DFS writer", file.logInfo(logger.Fields{Operation: Close, Error: err}))
-		}
-		file.pendingDFSWriter = nil
-	}
-
 	if file.fileProxy != nil { // if not already closed
 		cached := false
 		// If caching is enabled and this is a LocalRWFileProxy, add to cache
@@ -196,6 +188,17 @@ func (file *FileINode) markDirty() {
 func (file *FileINode) flushToDFS(operation string) error {
 	// Check dirty flag (already protected by dataMutex held by caller)
 	if !file.isDirty {
+		// If there's a pending writer from file creation (e.g. touch or empty file),
+		// close it synchronously here in Flush (not in async Release) to ensure the
+		// file is complete in HDFS before any subsequent rename/read operations.
+		if file.pendingDFSWriter != nil {
+			err := file.pendingDFSWriter.Close()
+			file.pendingDFSWriter = nil
+			if err != nil {
+				logger.Error("Failed to close pending DFS writer during flush", file.logInfo(logger.Fields{Operation: operation, Error: err}))
+				return err
+			}
+		}
 		logger.Info("Upload to DFS. Ignoring request as no data has changed", file.logInfo(logger.Fields{Operation: operation}))
 		return nil
 	}
