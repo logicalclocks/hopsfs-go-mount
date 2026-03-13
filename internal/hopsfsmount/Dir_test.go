@@ -109,6 +109,155 @@ func TestLookupWithFiltering(t *testing.T) {
 	assert.Equal(t, syscall.ENOENT, err) // Not found error, since it is not in the allowed prefixes
 }
 
+// Testing negative lookup cache - ENOENT results are cached
+func TestNegativeLookupCache(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	mockClock := &MockClock{}
+	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
+	fs, _ := NewFileSystem([]HdfsAccessor{hdfsAccessor}, "/", []string{"*"}, false, DelaySyncUntilClose, NewDefaultRetryPolicy(mockClock), mockClock)
+	root, _ := fs.Root()
+
+	// First lookup should hit the backend and get ENOENT
+	hdfsAccessor.EXPECT().Stat("/nonexistent").Return(Attrs{}, syscall.ENOENT)
+	_, err := root.(*DirINode).Lookup(nil, "nonexistent")
+	assert.Equal(t, syscall.ENOENT, err)
+
+	// Second lookup should be served from negative cache (no backend Stat call)
+	_, err = root.(*DirINode).Lookup(nil, "nonexistent")
+	assert.Equal(t, syscall.ENOENT, err)
+}
+
+// Testing that negative cache entries expire after CacheAttrsTimeDuration
+func TestNegativeLookupCacheExpiry(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	mockClock := &MockClock{}
+	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
+	fs, _ := NewFileSystem([]HdfsAccessor{hdfsAccessor}, "/", []string{"*"}, false, DelaySyncUntilClose, NewDefaultRetryPolicy(mockClock), mockClock)
+	root, _ := fs.Root()
+
+	// First lookup - backend returns ENOENT
+	hdfsAccessor.EXPECT().Stat("/vanishing").Return(Attrs{}, syscall.ENOENT)
+	_, err := root.(*DirINode).Lookup(nil, "vanishing")
+	assert.Equal(t, syscall.ENOENT, err)
+
+	// Cached - no backend call
+	_, err = root.(*DirINode).Lookup(nil, "vanishing")
+	assert.Equal(t, syscall.ENOENT, err)
+
+	// Advance time past TTL - should re-query backend, this time the file exists
+	mockClock.NotifyTimeElapsed(CacheAttrsTimeDuration + time.Second)
+	hdfsAccessor.EXPECT().Stat("/vanishing").Return(Attrs{Name: "vanishing", Mode: 0644}, nil)
+	node, err := root.(*DirINode).Lookup(nil, "vanishing")
+	assert.Nil(t, err)
+	assert.NotNil(t, node)
+}
+
+// Testing that Create invalidates negative cache
+func TestNegativeCacheInvalidatedByCreate(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	mockClock := &MockClock{}
+	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
+	fs, _ := NewFileSystem([]HdfsAccessor{hdfsAccessor}, "/", []string{"*"}, false, DelaySyncUntilClose, NewDefaultRetryPolicy(mockClock), mockClock)
+	root, _ := fs.Root()
+
+	// Lookup returns ENOENT - populates negative cache
+	hdfsAccessor.EXPECT().Stat("/newfile").Return(Attrs{}, syscall.ENOENT)
+	_, err := root.(*DirINode).Lookup(nil, "newfile")
+	assert.Equal(t, syscall.ENOENT, err)
+
+	// Create the file - should invalidate the negative cache entry
+	hdfswriter := NewMockHdfsWriter(mockCtrl)
+	hdfswriter.EXPECT().Close().Return(nil).AnyTimes()
+	hdfsAccessor.EXPECT().CreateFileWithGroup("/newfile", gomock.Any(), gomock.Any(), gomock.Any()).Return(hdfswriter, nil).AnyTimes()
+	hdfsAccessor.EXPECT().Stat("/newfile").Return(Attrs{Name: "newfile", Mode: 0644}, nil).AnyTimes()
+	hdfsAccessor.EXPECT().Chown("/newfile", gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+	hdfsAccessor.EXPECT().Remove("/newfile").Return(nil).AnyTimes()
+	hdfsAccessor.EXPECT().StatFs().Return(FsInfo{capacity: uint64(100), used: uint64(20), remaining: uint64(80)}, nil).AnyTimes()
+
+	_, _, err = root.(*DirINode).Create(nil, &fuse.CreateRequest{Name: "newfile",
+		Flags: fuse.OpenReadWrite | fuse.OpenCreate, Mode: os.FileMode(0644)}, &fuse.CreateResponse{})
+	assert.Nil(t, err)
+
+	// Subsequent lookup should find the file (not return ENOENT from cache)
+	node, err := root.(*DirINode).Lookup(nil, "newfile")
+	assert.Nil(t, err)
+	assert.NotNil(t, node)
+}
+
+// Testing that Mkdir invalidates negative cache
+func TestNegativeCacheInvalidatedByMkdir(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	mockClock := &MockClock{}
+	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
+	fs, _ := NewFileSystem([]HdfsAccessor{hdfsAccessor}, "/", []string{"*"}, false, DelaySyncUntilClose, NewDefaultRetryPolicy(mockClock), mockClock)
+	root, _ := fs.Root()
+
+	// Lookup returns ENOENT - populates negative cache
+	hdfsAccessor.EXPECT().Stat("/newdir").Return(Attrs{}, syscall.ENOENT)
+	_, err := root.(*DirINode).Lookup(nil, "newdir")
+	assert.Equal(t, syscall.ENOENT, err)
+
+	// Mkdir the directory - should invalidate the negative cache entry
+	hdfsAccessor.EXPECT().MkdirWithGroup("/newdir", os.ModeDir|os.FileMode(0755), gomock.Any()).Return(nil)
+	hdfsAccessor.EXPECT().Chown("/newdir", gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+	node, err := root.(*DirINode).Mkdir(nil, &fuse.MkdirRequest{Name: "newdir", Mode: os.ModeDir | os.FileMode(0755)})
+	assert.Nil(t, err)
+	assert.Equal(t, "newdir", node.(*DirINode).Attrs.Name)
+
+	// Subsequent lookup should find the directory (not return ENOENT from cache)
+	node2, err := root.(*DirINode).Lookup(nil, "newdir")
+	assert.Nil(t, err)
+	assert.NotNil(t, node2)
+}
+
+// Testing that Rename invalidates negative cache in destination directory
+func TestNegativeCacheInvalidatedByRename(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	mockClock := &MockClock{}
+	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
+	fs, _ := NewFileSystem([]HdfsAccessor{hdfsAccessor}, "/", []string{"*"}, false, DelaySyncUntilClose, NewDefaultRetryPolicy(mockClock), mockClock)
+	root, _ := fs.Root()
+
+	// Create a source file in the children cache
+	rootDir := root.(*DirINode)
+	rootDir.addOrUpdateChildInodeAttrs("test", "srcfile", Attrs{Name: "srcfile", Mode: 0644})
+
+	// Lookup "dstfile" returns ENOENT - populates negative cache
+	hdfsAccessor.EXPECT().Stat("/dstfile").Return(Attrs{}, syscall.ENOENT)
+	_, err := rootDir.Lookup(nil, "dstfile")
+	assert.Equal(t, syscall.ENOENT, err)
+
+	// Rename srcfile -> dstfile should invalidate the negative cache for "dstfile"
+	hdfsAccessor.EXPECT().Rename2("/srcfile", "/dstfile", gomock.Any()).Return(nil)
+	err = rootDir.Rename(nil, &fuse.RenameRequest{OldName: "srcfile", NewName: "dstfile"}, rootDir)
+	assert.Nil(t, err)
+
+	// Subsequent lookup should find the renamed file (not return ENOENT from cache)
+	node, err := rootDir.Lookup(nil, "dstfile")
+	assert.Nil(t, err)
+	assert.NotNil(t, node)
+}
+
+// Testing that non-ENOENT errors are NOT cached
+func TestNegativeCacheOnlyForENOENT(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	mockClock := &MockClock{}
+	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
+	fs, _ := NewFileSystem([]HdfsAccessor{hdfsAccessor}, "/", []string{"*"}, false, DelaySyncUntilClose, NewDefaultRetryPolicy(mockClock), mockClock)
+	root, _ := fs.Root()
+
+	// First lookup returns EIO (not ENOENT) - should NOT be cached
+	hdfsAccessor.EXPECT().Stat("/ioerr").Return(Attrs{}, syscall.EIO)
+	_, err := root.(*DirINode).Lookup(nil, "ioerr")
+	assert.Equal(t, syscall.EIO, err)
+
+	// Second lookup should hit backend again (not served from cache)
+	hdfsAccessor.EXPECT().Stat("/ioerr").Return(Attrs{Name: "ioerr", Mode: 0644}, nil)
+	node, err := root.(*DirINode).Lookup(nil, "ioerr")
+	assert.Nil(t, err)
+	assert.NotNil(t, node)
+}
+
 // Testing Mkdir
 func TestMkdir(t *testing.T) {
 	dir := "/foo"

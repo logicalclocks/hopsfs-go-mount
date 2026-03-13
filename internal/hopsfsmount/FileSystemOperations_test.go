@@ -48,6 +48,187 @@ func TestReadWriteEmptyFile(t *testing.T) {
 	})
 }
 
+// Testing negative lookup cache with a live HopsFS cluster.
+// Creates a file via the backend API (bypassing FUSE) to prove the cache is active.
+func TestNegativeLookupCacheIntegration(t *testing.T) {
+	// Use a short TTL so the test doesn't wait too long
+	origCacheAttrsTimeDuration := CacheAttrsTimeDuration
+	CacheAttrsTimeDuration = 3 * time.Second
+	defer func() { CacheAttrsTimeDuration = origCacheAttrsTimeDuration }()
+
+	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
+		testFile := filepath.Join(mountPoint, "neg_cache_integration_test.txt")
+		hdfsPath := "/neg_cache_integration_test.txt"
+
+		// Clean up from previous runs
+		hdfsAccessor.Remove(hdfsPath)
+
+		// 1. Stat via FUSE — file doesn't exist, populates negative cache
+		_, err := os.Stat(testFile)
+		if !os.IsNotExist(err) {
+			t.Fatalf("File should not exist initially, got: %v", err)
+		}
+
+		// 2. Create the file directly via backend API (bypasses FUSE, so negative cache is NOT invalidated)
+		writer, err := hdfsAccessor.CreateFile(hdfsPath, os.FileMode(0644), false)
+		if err != nil {
+			t.Fatalf("Backend CreateFile failed: %v", err)
+		}
+		if _, err = writer.Write([]byte("hello")); err != nil {
+			t.Fatalf("Backend Write failed: %v", err)
+		}
+		if err = writer.Close(); err != nil {
+			t.Fatalf("Backend Close failed: %v", err)
+		}
+
+		// 3. Stat via FUSE — should still return ENOENT because the negative cache hasn't expired
+		_, err = os.Stat(testFile)
+		if !os.IsNotExist(err) {
+			t.Fatalf("File should still appear absent due to negative cache, got: %v", err)
+		}
+
+		// 4. Wait for the cache TTL to expire
+		time.Sleep(CacheAttrsTimeDuration + 1*time.Second)
+
+		// 5. Stat via FUSE — cache expired, should now find the file
+		info, err := os.Stat(testFile)
+		if err != nil {
+			t.Fatalf("File should be visible after cache expiry, got: %v", err)
+		}
+		if info.Size() != 5 {
+			t.Fatalf("Expected file size 5, got %d", info.Size())
+		}
+
+		// Clean up
+		hdfsAccessor.Remove(hdfsPath)
+	})
+}
+
+// Testing that backend-created directories are hidden by the negative cache until TTL expires.
+func TestNegativeCacheBackendMkdirIntegration(t *testing.T) {
+	origCacheAttrsTimeDuration := CacheAttrsTimeDuration
+	CacheAttrsTimeDuration = 3 * time.Second
+	defer func() { CacheAttrsTimeDuration = origCacheAttrsTimeDuration }()
+
+	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
+		testDir := filepath.Join(mountPoint, "neg_cache_mkdir_test")
+		hdfsPath := "/neg_cache_mkdir_test"
+
+		// Clean up from previous runs
+		hdfsAccessor.Remove(hdfsPath)
+
+		// 1. Stat via FUSE — directory doesn't exist, populates negative cache
+		_, err := os.Stat(testDir)
+		if !os.IsNotExist(err) {
+			t.Fatalf("Directory should not exist initially, got: %v", err)
+		}
+
+		// 2. Create directory directly via backend API (bypasses FUSE, negative cache NOT invalidated)
+		if err = hdfsAccessor.Mkdir(hdfsPath, os.ModeDir|os.FileMode(0755)); err != nil {
+			t.Fatalf("Backend Mkdir failed: %v", err)
+		}
+
+		// 3. Stat via FUSE — should still return ENOENT because negative cache hasn't expired
+		_, err = os.Stat(testDir)
+		if !os.IsNotExist(err) {
+			t.Fatalf("Directory should still appear absent due to negative cache, got: %v", err)
+		}
+
+		// 4. Wait for the cache TTL to expire
+		time.Sleep(CacheAttrsTimeDuration + 1*time.Second)
+
+		// 5. Stat via FUSE — cache expired, should now find the directory
+		info, err := os.Stat(testDir)
+		if err != nil {
+			t.Fatalf("Directory should be visible after cache expiry, got: %v", err)
+		}
+		if !info.IsDir() {
+			t.Fatalf("Expected a directory, got a file")
+		}
+
+		// Clean up
+		hdfsAccessor.Remove(hdfsPath)
+	})
+}
+
+// Testing that FUSE rename invalidates the negative cache for the destination name.
+// Steps:
+// 1. Create srcfile via FUSE
+// 2. Stat dstfile via FUSE → ENOENT (populates negative cache)
+// 3. Create dstfile via backend API (bypasses FUSE)
+// 4. Stat dstfile via FUSE → still ENOENT (proves cache is active)
+// 5. Remove dstfile via backend API (restore "doesn't exist" in backend)
+// 6. Rename srcfile → dstfile via FUSE (should invalidate negative cache)
+// 7. Stat dstfile via FUSE → success immediately (no TTL wait — proves rename invalidated cache)
+func TestNegativeCacheInvalidatedByFuseRename(t *testing.T) {
+	origCacheAttrsTimeDuration := CacheAttrsTimeDuration
+	CacheAttrsTimeDuration = 30 * time.Second // Long TTL so we can prove invalidation, not expiry
+	defer func() { CacheAttrsTimeDuration = origCacheAttrsTimeDuration }()
+
+	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
+		srcFile := filepath.Join(mountPoint, "neg_cache_rename_src.txt")
+		dstFile := filepath.Join(mountPoint, "neg_cache_rename_dst.txt")
+		hdfsSrcPath := "/neg_cache_rename_src.txt"
+		hdfsDstPath := "/neg_cache_rename_dst.txt"
+
+		// Clean up from previous runs
+		hdfsAccessor.Remove(hdfsSrcPath)
+		hdfsAccessor.Remove(hdfsDstPath)
+
+		// 1. Create srcfile via FUSE
+		if err := createFile(srcFile, "rename test data"); err != nil {
+			t.Fatalf("Failed to create src file via FUSE: %v", err)
+		}
+
+		// 2. Stat dstfile via FUSE → ENOENT (populates negative cache)
+		_, err := os.Stat(dstFile)
+		if !os.IsNotExist(err) {
+			t.Fatalf("dstfile should not exist initially, got: %v", err)
+		}
+
+		// 3. Create dstfile via backend API (bypasses FUSE)
+		writer, err := hdfsAccessor.CreateFile(hdfsDstPath, os.FileMode(0644), false)
+		if err != nil {
+			t.Fatalf("Backend CreateFile for dstfile failed: %v", err)
+		}
+		if _, err = writer.Write([]byte("temp")); err != nil {
+			t.Fatalf("Backend Write failed: %v", err)
+		}
+		if err = writer.Close(); err != nil {
+			t.Fatalf("Backend Close failed: %v", err)
+		}
+
+		// 4. Stat dstfile via FUSE → still ENOENT (proves negative cache is active)
+		_, err = os.Stat(dstFile)
+		if !os.IsNotExist(err) {
+			t.Fatalf("dstfile should still appear absent due to negative cache, got: %v", err)
+		}
+
+		// 5. Remove dstfile via backend API (restore to "doesn't exist" in backend)
+		if err = hdfsAccessor.Remove(hdfsDstPath); err != nil {
+			t.Fatalf("Backend Remove of dstfile failed: %v", err)
+		}
+
+		// 6. Rename srcfile → dstfile via FUSE (should invalidate negative cache for dstfile)
+		if err = os.Rename(srcFile, dstFile); err != nil {
+			t.Fatalf("FUSE Rename failed: %v", err)
+		}
+
+		// 7. Stat dstfile via FUSE → success immediately (no TTL wait needed)
+		//    If the cache was NOT invalidated, this would return stale ENOENT
+		info, err := os.Stat(dstFile)
+		if err != nil {
+			t.Fatalf("dstfile should be visible immediately after rename (cache invalidated), got: %v", err)
+		}
+		if info.Size() != int64(len("rename test data")) {
+			t.Fatalf("Expected file size %d, got %d", len("rename test data"), info.Size())
+		}
+
+		// Clean up
+		hdfsAccessor.Remove(hdfsDstPath)
+	})
+}
+
 func TestSimple(t *testing.T) {
 
 	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
