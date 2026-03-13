@@ -10,6 +10,7 @@ import (
 	"path"
 	"sync"
 	"syscall"
+	"time"
 
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
@@ -22,9 +23,10 @@ type DirINode struct {
 	FileSystem    *FileSystem        // Pointer to the owning filesystem
 	Attrs         Attrs              // Cached attributes of the directory, TODO: add TTL
 	Parent        *DirINode          // Pointer to the parent directory (allows computing fully-qualified paths on demand)
-	children      map[string]fs.Node // Cahed directory entries
-	childrenMutex sync.Mutex         // for concurrent read and updates
-	dirMutex      sync.Mutex         // One read or write operation on a directory at a time
+	children      map[string]fs.Node    // Cahed directory entries
+	negativeCache map[string]time.Time  // Caches "not found" results: name → expiry time
+	childrenMutex sync.Mutex            // for concurrent read and updates
+	dirMutex      sync.Mutex            // One read or write operation on a directory at a time
 }
 
 // Verify that *Dir implements necesary FUSE interfaces
@@ -165,6 +167,11 @@ func (dir *DirINode) LookupInt(opName string, name string) (fs.Node, error) {
 		return node, nil
 	}
 
+	// Check negative cache before hitting the backend
+	if dir.checkNegativeCache(opName, name) {
+		return nil, syscall.ENOENT
+	}
+
 	var attrs Attrs
 	node, err := dir.statInodeInHopsFS(opName, name, &attrs)
 	if err != nil {
@@ -211,6 +218,9 @@ func (dir *DirINode) statInodeInHopsFS(operation, name string, attrs *Attrs) (fs
 	if err != nil {
 		logger.Info("Stat failed on backend", logger.Fields{Operation: operation, Path: path.Join(dir.AbsolutePath(), name), Error: err})
 		dir.removeChildInode(operation, name)
+		if err == syscall.ENOENT {
+			dir.addNegativeCacheEntry(name)
+		}
 		return nil, err
 	}
 	*attrs = a
@@ -249,6 +259,7 @@ func (dir *DirINode) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node
 	}
 	logger.Debug("mkdir successful with group", logger.Fields{Operation: Mkdir, Path: path.Join(dir.AbsolutePath(), req.Name), Group: groupName})
 
+	dir.removeNegativeCacheEntry(req.Name)
 	newInode := dir.addOrUpdateChildInodeAttrs(Mkdir, req.Name,
 		Attrs{
 			Name:         req.Name,
@@ -294,6 +305,7 @@ func (dir *DirINode) Create(ctx context.Context, req *fuse.CreateRequest, resp *
 		DFSGroupName: groupName,
 	}
 
+	dir.removeNegativeCacheEntry(req.Name)
 	file := (dir.addOrUpdateChildInodeAttrs(Create, req.Name, newFileAttrs)).(*FileINode)
 	handle, err := file.NewFileHandle(false, req.Flags)
 	if err != nil {
@@ -387,6 +399,9 @@ func (srcParent *DirINode) renameInt(operationName, oldName, newName string, dst
 		dstParentDir.(*DirINode).removeChildInode(Rename, newName)
 	}
 
+	// Invalidate negative cache for the new name in the destination directory
+	dstParentDir.(*DirINode).removeNegativeCacheEntry(newName)
+
 	// Upon successful rename, updating in-memory representation of the file entry
 	// file rename
 	if fnode, ok := (srcInode).(*FileINode); ok {
@@ -476,6 +491,54 @@ func (dir *DirINode) Forget() {
 	// ask parent to remove me from the children list
 	// logger.Debug(fmt.Sprintf("Forget for dir %s", dir.Attrs.Name), nil)
 	// dir.Parent.removeChildInode(Forget, dir.Attrs.Name)
+}
+
+// checkNegativeCache returns true if the name is in the negative cache and not expired.
+// Must NOT hold childrenMutex when calling this.
+func (dir *DirINode) checkNegativeCache(operation, name string) bool {
+	dir.lockChildrenMutex()
+	defer dir.unlockChildrenMutex()
+
+	if dir.negativeCache == nil {
+		return false
+	}
+
+	expiry, ok := dir.negativeCache[name]
+	if !ok {
+		return false
+	}
+
+	if dir.FileSystem.Clock.Now().After(expiry) {
+		delete(dir.negativeCache, name)
+		return false
+	}
+
+	logger.Debug("Negative cache hit", logger.Fields{Operation: operation, Parent: dir.AbsolutePath(), Child: name})
+	return true
+}
+
+// addNegativeCacheEntry adds a name to the negative cache with TTL = CacheAttrsTimeDuration.
+// Must NOT hold childrenMutex when calling this.
+func (dir *DirINode) addNegativeCacheEntry(name string) {
+	dir.lockChildrenMutex()
+	defer dir.unlockChildrenMutex()
+
+	if dir.negativeCache == nil {
+		dir.negativeCache = make(map[string]time.Time)
+	}
+
+	dir.negativeCache[name] = dir.FileSystem.Clock.Now().Add(CacheAttrsTimeDuration)
+}
+
+// removeNegativeCacheEntry removes a name from the negative cache.
+// Must NOT hold childrenMutex when calling this.
+func (dir *DirINode) removeNegativeCacheEntry(name string) {
+	dir.lockChildrenMutex()
+	defer dir.unlockChildrenMutex()
+
+	if dir.negativeCache != nil {
+		delete(dir.negativeCache, name)
+	}
 }
 
 func (dir *DirINode) lockMutex() {
