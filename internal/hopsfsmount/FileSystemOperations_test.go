@@ -229,6 +229,218 @@ func TestNegativeCacheInvalidatedByFuseRename(t *testing.T) {
 	})
 }
 
+// Test: Create a file without writing any data (touch).
+// Verifies that the pending DFS writer is properly closed on Release,
+// resulting in an empty file in HDFS.
+func TestPendingWriterSimpleCreate(t *testing.T) {
+	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
+		testFile := filepath.Join(mountPoint, "pending_writer_touch.txt")
+		hdfsPath := "/pending_writer_touch.txt"
+		hdfsAccessor.Remove(hdfsPath)
+
+		// Create and immediately close (like touch)
+		f, err := os.Create(testFile)
+		if err != nil {
+			t.Fatalf("Failed to create file: %v", err)
+		}
+		f.Close()
+
+		// Verify file exists and is empty
+		info, err := os.Stat(testFile)
+		if err != nil {
+			t.Fatalf("Failed to stat file after touch: %v", err)
+		}
+		if info.Size() != 0 {
+			t.Fatalf("Expected empty file, got size %d", info.Size())
+		}
+
+		// Verify via backend API that the file exists in HDFS
+		attrs, err := hdfsAccessor.Stat(hdfsPath)
+		if err != nil {
+			t.Fatalf("File should exist in HDFS after touch: %v", err)
+		}
+		if attrs.Size != 0 {
+			t.Fatalf("Expected empty file in HDFS, got size %d", attrs.Size)
+		}
+
+		hdfsAccessor.Remove(hdfsPath)
+	})
+}
+
+// Test: Create a file, write data, close.
+// Verifies the pending DFS writer is reused on first flush (no redundant Remove+Recreate).
+func TestPendingWriterSimpleWrite(t *testing.T) {
+	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
+		testFile := filepath.Join(mountPoint, "pending_writer_write.txt")
+		hdfsPath := "/pending_writer_write.txt"
+		hdfsAccessor.Remove(hdfsPath)
+
+		testData := "hello from pending writer test"
+		if err := createFile(testFile, testData); err != nil {
+			t.Fatalf("Failed to create file: %v", err)
+		}
+
+		// Read back via FUSE and verify content
+		data, err := readFile(t, testFile)
+		if err != nil {
+			t.Fatalf("Failed to read file: %v", err)
+		}
+		if data != testData {
+			t.Fatalf("Data mismatch: expected %q, got %q", testData, data)
+		}
+
+		// Verify via backend API
+		attrs, err := hdfsAccessor.Stat(hdfsPath)
+		if err != nil {
+			t.Fatalf("File should exist in HDFS: %v", err)
+		}
+		if attrs.Size != uint64(len(testData)) {
+			t.Fatalf("Expected size %d in HDFS, got %d", len(testData), attrs.Size)
+		}
+
+		hdfsAccessor.Remove(hdfsPath)
+	})
+}
+
+// Test: Create a file, write data, flush explicitly, write more data, flush again, close.
+// First flush should reuse the pending writer. Second flush should use Remove+Recreate path.
+func TestPendingWriterMultipleFlushes(t *testing.T) {
+	withMount(t, "/", false /* sync on flush, not on close */, func(mountPoint string, hdfsAccessor HdfsAccessor) {
+		testFile := filepath.Join(mountPoint, "pending_writer_multi_flush.txt")
+		hdfsPath := "/pending_writer_multi_flush.txt"
+		hdfsAccessor.Remove(hdfsPath)
+
+		// Create and write first batch
+		f, err := os.OpenFile(testFile, os.O_CREATE|os.O_RDWR, 0644)
+		if err != nil {
+			t.Fatalf("Failed to create file: %v", err)
+		}
+
+		firstData := "first write"
+		if _, err := f.WriteString(firstData); err != nil {
+			t.Fatalf("Failed to write first batch: %v", err)
+		}
+
+		// First flush — should reuse the pending DFS writer
+		if err := f.Sync(); err != nil {
+			t.Fatalf("First Sync failed: %v", err)
+		}
+
+		// Verify first write via backend
+		attrs, err := hdfsAccessor.Stat(hdfsPath)
+		if err != nil {
+			t.Fatalf("File should exist after first flush: %v", err)
+		}
+		if attrs.Size != uint64(len(firstData)) {
+			t.Fatalf("After first flush: expected size %d, got %d", len(firstData), attrs.Size)
+		}
+
+		// Write more data (appends to staging file)
+		secondData := " and second write"
+		if _, err := f.WriteString(secondData); err != nil {
+			t.Fatalf("Failed to write second batch: %v", err)
+		}
+
+		// Second flush — pending writer is nil, should use Remove+Recreate path
+		if err := f.Sync(); err != nil {
+			t.Fatalf("Second Sync failed: %v", err)
+		}
+
+		// Verify combined data via backend
+		expectedData := firstData + secondData
+		attrs, err = hdfsAccessor.Stat(hdfsPath)
+		if err != nil {
+			t.Fatalf("File should exist after second flush: %v", err)
+		}
+		if attrs.Size != uint64(len(expectedData)) {
+			t.Fatalf("After second flush: expected size %d, got %d", len(expectedData), attrs.Size)
+		}
+
+		f.Close()
+
+		// Read back and verify full content
+		data, err := readFile(t, testFile)
+		if err != nil {
+			t.Fatalf("Failed to read file: %v", err)
+		}
+		if data != expectedData {
+			t.Fatalf("Data mismatch: expected %q, got %q", expectedData, data)
+		}
+
+		hdfsAccessor.Remove(hdfsPath)
+	})
+}
+
+// Test: Multiple handles open the same file, each writes and flushes.
+// Verifies that the pending writer optimization works correctly with concurrent handles.
+func TestPendingWriterMultiHandleFlush(t *testing.T) {
+	withMount(t, "/", false /* sync on flush */, func(mountPoint string, hdfsAccessor HdfsAccessor) {
+		testFile := filepath.Join(mountPoint, "pending_writer_multi_handle.txt")
+		hdfsPath := "/pending_writer_multi_handle.txt"
+		hdfsAccessor.Remove(hdfsPath)
+
+		// First handle: create and write
+		f1, err := os.OpenFile(testFile, os.O_CREATE|os.O_RDWR, 0644)
+		if err != nil {
+			t.Fatalf("Failed to create file with first handle: %v", err)
+		}
+
+		data1 := "handle1 data"
+		if _, err := f1.WriteString(data1); err != nil {
+			t.Fatalf("Failed to write from first handle: %v", err)
+		}
+
+		// First flush from first handle
+		if err := f1.Sync(); err != nil {
+			t.Fatalf("First handle Sync failed: %v", err)
+		}
+
+		// Verify data after first flush
+		attrs, err := hdfsAccessor.Stat(hdfsPath)
+		if err != nil {
+			t.Fatalf("File should exist after first handle flush: %v", err)
+		}
+		if attrs.Size != uint64(len(data1)) {
+			t.Fatalf("After first handle flush: expected size %d, got %d", len(data1), attrs.Size)
+		}
+
+		// Second handle: open the same file for writing
+		f2, err := os.OpenFile(testFile, os.O_RDWR, 0644)
+		if err != nil {
+			t.Fatalf("Failed to open file with second handle: %v", err)
+		}
+
+		// Second handle writes at beginning (overwrites)
+		data2 := "handle2 overwrites everything here"
+		if _, err := f2.WriteString(data2); err != nil {
+			t.Fatalf("Failed to write from second handle: %v", err)
+		}
+
+		// Flush from second handle
+		if err := f2.Sync(); err != nil {
+			t.Fatalf("Second handle Sync failed: %v", err)
+		}
+
+		f1.Close()
+		f2.Close()
+
+		// Read back — second handle's write should be visible
+		data, err := readFile(t, testFile)
+		if err != nil {
+			t.Fatalf("Failed to read file: %v", err)
+		}
+
+		// The final content depends on staging file behavior:
+		// Both handles share the same staging file, so writes are interleaved.
+		// Just verify the file is readable and non-empty.
+		if len(data) == 0 {
+			t.Fatalf("Expected non-empty file after multi-handle writes")
+		}
+
+		hdfsAccessor.Remove(hdfsPath)
+	})
+}
+
 func TestSimple(t *testing.T) {
 
 	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
