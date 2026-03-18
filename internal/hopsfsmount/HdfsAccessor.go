@@ -400,6 +400,7 @@ func isNonRetriableError(err error) bool {
 		err == fuse.EEXIST ||
 		err == syscall.ENOENT ||
 		err == syscall.EACCES ||
+		err == syscall.EPERM ||
 		err == syscall.ENOTEMPTY ||
 		err == syscall.EEXIST ||
 		err == syscall.EROFS ||
