@@ -17,6 +17,7 @@ import (
 func TestEnsureConnectedWithRetries(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
+	hdfsAccessor.EXPECT().IsAvailable().Return(true).AnyTimes()
 	ftHdfsAccessor := NewFaultTolerantHdfsAccessor(hdfsAccessor, atMost2Attempts())
 	hdfsAccessor.EXPECT().EnsureConnected().Return(errors.New("Injected failure"))
 	hdfsAccessor.EXPECT().EnsureConnected().Return(nil)
@@ -28,6 +29,7 @@ func TestEnsureConnectedWithRetries(t *testing.T) {
 func TestStatWithRetries(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
+	hdfsAccessor.EXPECT().IsAvailable().Return(true).AnyTimes()
 	ftHdfsAccessor := NewFaultTolerantHdfsAccessor(hdfsAccessor, atMost2Attempts())
 	hdfsAccessor.EXPECT().Stat("/test/file").Return(Attrs{}, errors.New("Injected failure"))
 	hdfsAccessor.EXPECT().Stat("/test/file").Return(Attrs{Name: "file"}, nil)
@@ -41,6 +43,7 @@ func TestStatWithRetries(t *testing.T) {
 func TestMkdirWithRetries(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
+	hdfsAccessor.EXPECT().IsAvailable().Return(true).AnyTimes()
 	ftHdfsAccessor := NewFaultTolerantHdfsAccessor(hdfsAccessor, atMost2Attempts())
 	hdfsAccessor.EXPECT().Mkdir("/test/dir", os.FileMode(0757)).Return(errors.New("Injected failure"))
 	hdfsAccessor.EXPECT().Mkdir("/test/dir", os.FileMode(0757)).Return(nil)
@@ -53,6 +56,7 @@ func TestMkdirWithRetries(t *testing.T) {
 func TestReadDirWithRetries(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
+	hdfsAccessor.EXPECT().IsAvailable().Return(true).AnyTimes()
 	ftHdfsAccessor := NewFaultTolerantHdfsAccessor(hdfsAccessor, atMost2Attempts())
 	var result []Attrs
 	var err error

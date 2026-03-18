@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -43,6 +44,7 @@ type HdfsAccessor interface {
 	Chown(path string, owner, group string) error // Changes the owner and group of the file
 	Chmod(path string, mode os.FileMode) error    // Changes the mode of the file
 	Close() error                                 // Close current meta connection if needed
+	IsAvailable() bool                            // Returns true if the accessor is not busy
 }
 
 type TLSConfig struct {
@@ -59,6 +61,7 @@ type HdfsAccessorImpl struct {
 	MetadataClient      *hdfs.Client // HDFS client used for metadata operations
 	MetadataClientMutex sync.Mutex   // Serializing all metadata operations for simplicity (for now), TODO: allow N concurrent operations
 	TLSConfig           TLSConfig    // enable/disable using tls
+	busy                atomic.Bool  // set while MetadataClientMutex is held
 }
 
 var _ HdfsAccessor = (*HdfsAccessorImpl)(nil) // ensure hdfsAccessorImpl implements HdfsAccessor
@@ -411,15 +414,14 @@ func isNonRetriableError(err error) bool {
 		err == fuse.EEXIST ||
 		err == syscall.ENOENT ||
 		err == syscall.EACCES ||
+		err == syscall.EPERM ||
+		err == syscall.EINVAL ||
+		err == syscall.EBADF ||
 		err == syscall.ENOTEMPTY ||
 		err == syscall.EEXIST ||
 		err == syscall.EROFS ||
 		err == syscall.EDQUOT ||
-		err == syscall.ENOLINK ||
-		err == os.ErrNotExist ||
-		err == os.ErrPermission ||
-		err == os.ErrExist ||
-		err == os.ErrClosed {
+		err == syscall.ENOLINK {
 		return true
 	} else {
 		return false
@@ -563,11 +565,18 @@ func (dfs *HdfsAccessorImpl) Close() error {
 	return nil
 }
 
+// IsAvailable returns true if the mutex is not currently held
+func (dfs *HdfsAccessorImpl) IsAvailable() bool {
+	return !dfs.busy.Load()
+}
+
 func (dfs *HdfsAccessorImpl) lockHadoopClient() {
 	dfs.MetadataClientMutex.Lock()
+	dfs.busy.Store(true)
 }
 
 func (dfs *HdfsAccessorImpl) unlockHadoopClient() {
+	dfs.busy.Store(false)
 	dfs.MetadataClientMutex.Unlock()
 }
 

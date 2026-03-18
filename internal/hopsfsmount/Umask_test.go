@@ -89,6 +89,7 @@ func TestUmaskBasedPermissions(t *testing.T) {
 			mockCtrl := gomock.NewController(t)
 			mockClock := &MockClock{}
 			hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
+			hdfsAccessor.EXPECT().IsAvailable().Return(true).AnyTimes()
 			testFile, err := GenerateTestDir()
 			assert.Nil(t, err)
 			testFile = "/" + testFile
