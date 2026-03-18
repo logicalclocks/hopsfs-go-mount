@@ -5,6 +5,7 @@ package hopsfsmount
 
 import (
 	"fmt"
+	"runtime"
 	"strconv"
 
 	"bazil.org/fuse"
@@ -151,7 +152,18 @@ func (filesystem *FileSystem) Statfs(ctx context.Context, req *fuse.StatfsReques
 }
 
 func (filesystem *FileSystem) getDFSConnector() HdfsAccessor {
-	filesystem.hdfsAccessorsIndex = filesystem.hdfsAccessorsIndex + 1
-	index := filesystem.hdfsAccessorsIndex % len(filesystem.HdfsAccessors)
-	return filesystem.HdfsAccessors[index]
+	n := len(filesystem.HdfsAccessors)
+	for {
+		start := filesystem.hdfsAccessorsIndex + 1
+		for i := 0; i < n; i++ {
+			index := (start + i) % n
+			if filesystem.HdfsAccessors[index].IsAvailable() {
+				filesystem.hdfsAccessorsIndex = index
+				return filesystem.HdfsAccessors[index]
+			}
+		}
+		// All connections busy — yield and retry.
+		// Normal operations finish in milliseconds, so this resolves quickly.
+		runtime.Gosched()
+	}
 }

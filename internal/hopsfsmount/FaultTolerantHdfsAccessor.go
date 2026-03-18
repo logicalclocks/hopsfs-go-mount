@@ -16,6 +16,11 @@ type FaultTolerantHdfsAccessor struct {
 
 var _ HdfsAccessor = (*FaultTolerantHdfsAccessor)(nil) // ensure FaultTolerantHdfsAccessor implements HdfsAccessor
 
+// IsAvailable delegates to the underlying accessor
+func (fta *FaultTolerantHdfsAccessor) IsAvailable() bool {
+	return fta.Impl.IsAvailable()
+}
+
 // Creates an instance of FaultTolerantHdfsAccessor
 func NewFaultTolerantHdfsAccessor(impl HdfsAccessor, retryPolicy *RetryPolicy) *FaultTolerantHdfsAccessor {
 	return &FaultTolerantHdfsAccessor{
@@ -53,13 +58,11 @@ func (fta *FaultTolerantHdfsAccessor) OpenRead(path string) (ReadSeekCloser, err
 
 // Opens HDFS file for writing
 func (fta *FaultTolerantHdfsAccessor) CreateFile(path string, mode os.FileMode, overwrite bool) (HdfsWriter, error) {
-	// TODO: implement fault-tolerance. For now re-try-loop is implemented inside FileHandleWriter
 	return fta.Impl.CreateFile(path, mode, overwrite)
 }
 
 // Opens HDFS file for writing with specific group
 func (fta *FaultTolerantHdfsAccessor) CreateFileWithGroup(path string, mode os.FileMode, overwrite bool, groupname string) (HdfsWriter, error) {
-	// TODO: implement fault-tolerance. For now re-try-loop is implemented inside FileHandleWriter
 	return fta.Impl.CreateFileWithGroup(path, mode, overwrite, groupname)
 }
 
