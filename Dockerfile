@@ -13,13 +13,13 @@ RUN yum -y update && \
     yum clean all
 
 RUN  cd /tmp; \
-wget https://go.dev/dl/go1.19.1.linux-amd64.tar.gz 
+wget https://go.dev/dl/go1.26.1.linux-amd64.tar.gz 
 
 
 RUN cd /tmp; \
 ls -al; \
 rm -rf /usr/local/go; \
-tar -C /usr/local -xzf go1.19.1.linux-amd64.tar.gz 
+tar -C /usr/local -xzf go1.26.1.linux-amd64.tar.gz 
 
 RUN groupadd hopsfs --gid ${groupid}; \
 useradd -ms /bin/bash hopsfs --uid ${userid} --gid ${groupid};
