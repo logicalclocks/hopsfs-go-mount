@@ -47,9 +47,9 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-// replace github.com/colinmarc/hdfs/v2 v2.2.0 => github.com/logicalclocks/hopsfs-go-client/v2 v2.5.7
+replace github.com/colinmarc/hdfs/v2 v2.2.0 => github.com/logicalclocks/hopsfs-go-client/v2 v2.5.8
 
-replace github.com/colinmarc/hdfs/v2 v2.2.0 => /home/salman/code/hops/hopsfs-go/hopsfs-go-client
+//replace github.com/colinmarc/hdfs/v2 v2.2.0 => /home/salman/code/hops/hopsfs-go/hopsfs-go-client
 
 //replace bazil.org/fuse v0.0.0-20230120002735-62a210ff1fd5 => /home/salman/code/hops/hopsfs-go/fuse
 replace bazil.org/fuse v0.0.0-20230120002735-62a210ff1fd5 => github.com/logicalclocks/fuse v1.0.1
