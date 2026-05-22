@@ -68,7 +68,18 @@ func main() {
 	}
 
 	// Creating the virtual file system
-	fileSystem, err := hopsfsmount.NewFileSystem(ftHdfsAccessors, hopsfsmount.MntSrcDir, allowedPrefixes, hopsfsmount.ReadOnly, hopsfsmount.DelaySyncUntilClose, retryPolicy, hopsfsmount.WallClock{})
+	sharedVirtualPaths := splitCSV(hopsfsmount.VirtualDirectoryPathsString)
+	var virtualDirectoryOption hopsfsmount.FileSystemOption
+	if hopsfsmount.VirtualDirectoryName != "" && len(sharedVirtualPaths) > 0 {
+		virtualDirectoryOption = hopsfsmount.WithVirtualDirectory(
+			hopsfsmount.VirtualDirectoryName,
+			sharedVirtualPaths,
+			hopsfsmount.VirtualDirectoryBackendRoot,
+		)
+	}
+
+	fileSystem, err := hopsfsmount.NewFileSystem(ftHdfsAccessors, hopsfsmount.MntSrcDir, allowedPrefixes, hopsfsmount.ReadOnly, hopsfsmount.DelaySyncUntilClose, retryPolicy, hopsfsmount.WallClock{},
+		virtualDirectoryOption)
 	if err != nil {
 		logger.Fatal(fmt.Sprintf("Error/NewFileSystem: %v ", err), nil)
 	}
@@ -117,6 +128,21 @@ func main() {
 	if err != nil {
 		logger.Fatal(fmt.Sprintf("Failed to serve FS. Error: %v", err), nil)
 	}
+}
+
+func splitCSV(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			result = append(result, part)
+		}
+	}
+	return result
 }
 
 func createStagingDir() {

@@ -5,8 +5,11 @@ package hopsfsmount
 
 import (
 	"fmt"
+	"path"
 	"runtime"
+	"sort"
 	"strconv"
+	"strings"
 
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
@@ -18,21 +21,23 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
-	"strings"
 	"sync"
 )
 
 type FileSystem struct {
-	HdfsAccessors       []HdfsAccessor // Interface to access HDFS
-	hdfsAccessorsIndex  int
-	SrcDir              string       // Src directory that will mounted
-	AllowedPrefixes     []string     // List of allowed path prefixes (only those prefixes are exposed via mountpoint)
-	ReadOnly            bool         // Indicates whether mount filesystem with readonly
-	DelaySyncUntilClose bool         // If true, ignore sync/flush operations until file close
-	Mounted             bool         // True if filesystem is mounted
-	RetryPolicy         *RetryPolicy // Retry policy
-	Clock               Clock        // interface to get wall clock time
-	FsInfo              FsInfo       // Usage of HDFS, including capacity, remaining, used sizes.
+	HdfsAccessors               []HdfsAccessor // Interface to access HDFS
+	hdfsAccessorsIndex          int
+	SrcDir                      string   // Src directory that will mounted
+	AllowedPrefixes             []string // List of allowed path prefixes (only those prefixes are exposed via mountpoint)
+	VirtualDirectoryName        string   // Optional synthetic directory exposed at the mount root
+	VirtualDirectoryPaths       []string // Relative paths exposed inside the synthetic directory
+	VirtualDirectoryBackendRoot string   // Backend root used to resolve virtual directory paths
+	ReadOnly                    bool     // Indicates whether mount filesystem with readonly
+	DelaySyncUntilClose         bool     // If true, ignore sync/flush operations until file close
+	Mounted                     bool     // True if filesystem is mounted
+	RetryPolicy                 *RetryPolicy
+	Clock                       Clock  // interface to get wall clock time
+	FsInfo                      FsInfo // Usage of HDFS, including capacity, remaining, used sizes.
 
 	closeOnUnmount     []io.Closer // list of opened files (zip archives) to be closed on unmount
 	closeOnUnmountLock sync.Mutex  // mutex to protet closeOnUnmount
@@ -42,17 +47,37 @@ type FileSystem struct {
 var _ fs.FS = (*FileSystem)(nil)
 var _ fs.FSStatfser = (*FileSystem)(nil)
 
+type FileSystemOption func(*FileSystem)
+
+func WithVirtualDirectory(name string, paths []string, backendRoot string) FileSystemOption {
+	return func(filesystem *FileSystem) {
+		filesystem.VirtualDirectoryName = strings.TrimSpace(name)
+		filesystem.VirtualDirectoryPaths = normalizeVirtualDirectoryPaths(paths)
+		if strings.TrimSpace(backendRoot) != "" {
+			filesystem.VirtualDirectoryBackendRoot = strings.TrimSpace(backendRoot)
+		}
+	}
+}
+
 // Creates an instance of mountable file system
-func NewFileSystem(hdfsAccessors []HdfsAccessor, srcDir string, allowedPrefixes []string, readOnly bool, delaySyncUntilClose bool, retryPolicy *RetryPolicy, clock Clock) (*FileSystem, error) {
-	return &FileSystem{
-		HdfsAccessors:       hdfsAccessors,
-		Mounted:             false,
-		AllowedPrefixes:     allowedPrefixes,
-		ReadOnly:            readOnly,
-		DelaySyncUntilClose: delaySyncUntilClose,
-		RetryPolicy:         retryPolicy,
-		Clock:               clock,
-		SrcDir:              srcDir}, nil
+func NewFileSystem(hdfsAccessors []HdfsAccessor, srcDir string, allowedPrefixes []string, readOnly bool, delaySyncUntilClose bool, retryPolicy *RetryPolicy, clock Clock, opts ...FileSystemOption) (*FileSystem, error) {
+	filesystem := &FileSystem{
+		HdfsAccessors:               hdfsAccessors,
+		Mounted:                     false,
+		AllowedPrefixes:             allowedPrefixes,
+		VirtualDirectoryBackendRoot: "/Projects",
+		ReadOnly:                    readOnly,
+		DelaySyncUntilClose:         delaySyncUntilClose,
+		RetryPolicy:                 retryPolicy,
+		Clock:                       clock,
+		SrcDir:                      srcDir}
+	for _, opt := range opts {
+		if opt == nil {
+			continue
+		}
+		opt(filesystem)
+	}
+	return filesystem, nil
 }
 
 // Mounts the filesystem
@@ -113,8 +138,8 @@ func (filesystem *FileSystem) Root() (fs.Node, error) {
 }
 
 // Returns if given absoute path allowed by any of the prefixes
-func (filesystem *FileSystem) IsPathAllowed(path string) bool {
-	if path == "/" {
+func (filesystem *FileSystem) IsPathAllowed(candidate string) bool {
+	if candidate == "/" {
 		return true
 	}
 	for _, prefix := range filesystem.AllowedPrefixes {
@@ -122,11 +147,120 @@ func (filesystem *FileSystem) IsPathAllowed(path string) bool {
 			return true
 		}
 		p := "/" + prefix
-		if p == path || strings.HasPrefix(path, p+"/") {
+		if p == candidate || strings.HasPrefix(candidate, p+"/") {
+			return true
+		}
+	}
+
+	if filesystem.HasVirtualDirectory() {
+		if candidate == path.Join("/", filesystem.VirtualDirectoryName) {
+			return true
+		}
+		for _, virtualPath := range filesystem.VirtualDirectoryPaths {
+			virtualCandidate := filesystem.VirtualDirectoryPath(virtualPath)
+			if virtualCandidate == candidate || strings.HasPrefix(candidate, virtualCandidate+"/") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func normalizeVirtualDirectoryPaths(paths []string) []string {
+	result := make([]string, 0, len(paths))
+	seen := make(map[string]struct{})
+	for _, p := range paths {
+		p = strings.TrimSpace(p)
+		p = strings.Trim(p, "/")
+		if p == "" {
+			continue
+		}
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		seen[p] = struct{}{}
+		result = append(result, p)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func (filesystem *FileSystem) HasVirtualDirectory() bool {
+	return filesystem.VirtualDirectoryName != "" && len(filesystem.VirtualDirectoryPaths) > 0
+}
+
+func (filesystem *FileSystem) VirtualDirectoryPath(relPath string) string {
+	relPath = strings.Trim(relPath, "/")
+	if relPath == "" {
+		return path.Clean(filesystem.VirtualDirectoryBackendRoot)
+	}
+	return path.Join(filesystem.VirtualDirectoryBackendRoot, relPath)
+}
+
+func (filesystem *FileSystem) VirtualDirectoryRootPath() string {
+	if filesystem.VirtualDirectoryName == "" {
+		return ""
+	}
+	return path.Join("/", filesystem.VirtualDirectoryName)
+}
+
+func (filesystem *FileSystem) virtualDirectoryRelPathExists(relPath string) bool {
+	relPath = strings.Trim(relPath, "/")
+	if relPath == "" {
+		return false
+	}
+	for _, candidate := range filesystem.VirtualDirectoryPaths {
+		if candidate == relPath || strings.HasPrefix(candidate, relPath+"/") {
 			return true
 		}
 	}
 	return false
+}
+
+func (filesystem *FileSystem) virtualDirectoryLeafExists(relPath string) bool {
+	relPath = strings.Trim(relPath, "/")
+	for _, candidate := range filesystem.VirtualDirectoryPaths {
+		if candidate == relPath {
+			return true
+		}
+	}
+	return false
+}
+
+func (filesystem *FileSystem) virtualDirectoryChildNames(relPath string) []string {
+	relPath = strings.Trim(relPath, "/")
+	children := make(map[string]struct{})
+	prefix := relPath
+	if prefix != "" {
+		prefix += "/"
+	}
+	for _, candidate := range filesystem.VirtualDirectoryPaths {
+		if relPath == "" {
+			parts := strings.Split(candidate, "/")
+			if len(parts) > 0 && parts[0] != "" {
+				children[parts[0]] = struct{}{}
+			}
+			continue
+		}
+		if !strings.HasPrefix(candidate, prefix) {
+			continue
+		}
+		remainder := strings.TrimPrefix(candidate, prefix)
+		if remainder == "" {
+			continue
+		}
+		parts := strings.Split(remainder, "/")
+		if len(parts) > 0 && parts[0] != "" {
+			children[parts[0]] = struct{}{}
+		}
+	}
+
+	names := make([]string, 0, len(children))
+	for name := range children {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // Register a file to be closed on Unmount()
