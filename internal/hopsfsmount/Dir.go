@@ -21,16 +21,18 @@ import (
 
 // Encapsulates state and operations for directory node on the HDFS file system
 type DirINode struct {
-	FileSystem     *FileSystem // Pointer to the owning filesystem
-	Attrs          Attrs       // Cached attributes of the directory, TODO: add TTL
-	Parent         *DirINode   // Pointer to the parent directory (allows computing fully-qualified paths on demand)
-	BackendPath    string      // Optional backend path override for virtual directories
-	VirtualKind    VirtualDirKind
-	VirtualRelPath string
-	children       map[string]fs.Node
-	negativeCache  map[string]time.Time
-	childrenMutex  sync.Mutex
-	dirMutex       sync.Mutex
+	FileSystem           *FileSystem // Pointer to the owning filesystem
+	Attrs                Attrs       // Cached attributes of the directory, TODO: add TTL
+	Parent               *DirINode   // Pointer to the parent directory (allows computing fully-qualified paths on demand)
+	BackendPath          string      // Optional backend path override for virtual directories
+	VirtualStatPath      string
+	VirtualKind          VirtualDirKind
+	VirtualRelPath       string
+	VirtualRootCollision bool
+	children             map[string]fs.Node
+	negativeCache        map[string]time.Time
+	childrenMutex        sync.Mutex
+	dirMutex             sync.Mutex
 }
 
 type VirtualDirKind int
@@ -76,6 +78,18 @@ func (dir *DirINode) Attr(ctx context.Context, a *fuse.Attr) error {
 	dir.lockMutex()
 	defer dir.unlockMutex()
 
+	if dir.VirtualKind == VirtualDirSynthetic {
+		if dir.FileSystem.Clock.Now().After(dir.Attrs.Expires) {
+			if err := dir.refreshSyntheticAttrs(); err != nil {
+				return err
+			}
+		} else {
+			logger.Info("Stat successful. Returning from Cache ", logger.Fields{Operation: GetattrDir, Path: path.Join(dir.AbsolutePath()), FileSize: dir.Attrs.Size,
+				IsDir: dir.Attrs.Mode.IsDir(), IsRegular: dir.Attrs.Mode.IsRegular()})
+		}
+		return dir.Attrs.ConvertAttrToFuse(a)
+	}
+
 	if dir.VirtualKind == VirtualDirNone && dir.Parent != nil && dir.FileSystem.Clock.Now().After(dir.Attrs.Expires) {
 		_, err := dir.Parent.statInodeInHopsFS(GetattrDir, dir.Attrs.Name, &dir.Attrs)
 		if err != nil {
@@ -115,20 +129,33 @@ func (dir *DirINode) addOrUpdateChildInodeAttrs(operation, name string, attrs At
 		dir.children = make(map[string]fs.Node)
 	}
 
+	shouldBeDir := (attrs.Mode & os.ModeDir) != 0
 	if node, ok := dir.children[name]; ok {
-		if fnode, ok := (node).(*FileINode); ok {
-			fnode.Attrs = attrs
-		} else if dnode, ok := (node).(*DirINode); ok {
-			dnode.Attrs = attrs
+		if shouldBeDir {
+			if dnode, ok := (node).(*DirINode); ok {
+				dnode.Attrs = attrs
+				logger.Debug("Children's List. addOrUpdateChildInodeAttrs. Update ", logger.Fields{Operation: operation, Parent: dir.AbsolutePath(), Child: name, NumChildren: len(dir.children)})
+				return node
+			}
+			node = &DirINode{FileSystem: dir.FileSystem, Parent: dir, Attrs: attrs}
+		} else {
+			if fnode, ok := (node).(*FileINode); ok {
+				fnode.Attrs = attrs
+				logger.Debug("Children's List. addOrUpdateChildInodeAttrs. Update ", logger.Fields{Operation: operation, Parent: dir.AbsolutePath(), Child: name, NumChildren: len(dir.children)})
+				return node
+			}
+			node = &FileINode{FileSystem: dir.FileSystem, Parent: dir, Attrs: attrs}
 		}
-		logger.Debug("Children's List. addOrUpdateChildInodeAttrs. Update ", logger.Fields{Operation: operation, Parent: dir.AbsolutePath(), Child: name, NumChildren: len(dir.children)})
+
+		dir.children[name] = node
+		logger.Debug("Children's List. addOrUpdateChildInodeAttrs. Replace ", logger.Fields{Operation: operation, Parent: dir.AbsolutePath(), Child: name, NumChildren: len(dir.children)})
 		return node
 	} else {
 		var node fs.Node
-		if (attrs.Mode & os.ModeDir) == 0 {
-			node = &FileINode{FileSystem: dir.FileSystem, Parent: dir, Attrs: attrs}
-		} else {
+		if shouldBeDir {
 			node = &DirINode{FileSystem: dir.FileSystem, Parent: dir, Attrs: attrs}
+		} else {
+			node = &FileINode{FileSystem: dir.FileSystem, Parent: dir, Attrs: attrs}
 		}
 		dir.children[name] = node
 		logger.Debug("Children's List. addOrUpdateChildInodeAttrs. Add ", logger.Fields{Operation: operation, Parent: dir.AbsolutePath(), Child: name, NumChildren: len(dir.children)})
@@ -174,7 +201,38 @@ func (dir *DirINode) Lookup(ctx context.Context, name string) (fs.Node, error) {
 
 func (dir *DirINode) LookupInt(opName string, name string) (fs.Node, error) {
 	if dir.Parent == nil && dir.FileSystem.HasVirtualDirectory() && name == dir.FileSystem.VirtualDirectoryName {
-		return dir.ensureVirtualDirectoryRootChild(opName), nil
+		now := dir.FileSystem.Clock.Now()
+		if node := dir.getChildInode(opName, name); node != nil {
+			switch cached := node.(type) {
+			case *DirINode:
+				if cached.VirtualKind == VirtualDirSynthetic {
+					if !dir.VirtualRootCollision && now.Before(cached.Attrs.Expires) {
+						return cached, nil
+					}
+				} else if now.Before(cached.Attrs.Expires) {
+					return cached, nil
+				}
+			case *FileINode:
+				if now.Before(cached.Attrs.Expires) {
+					return cached, nil
+				}
+			}
+		}
+
+		dir.removeChildInode(opName, name)
+		var attrs Attrs
+		node, err := dir.statInodeInHopsFS(opName, name, &attrs)
+		if err == nil {
+			return node, nil
+		}
+		if err != syscall.ENOENT {
+			return nil, err
+		}
+		child, childErr := dir.ensureVirtualDirectoryRootChild(opName)
+		if childErr != nil {
+			return nil, childErr
+		}
+		return child, nil
 	}
 
 	if dir.VirtualKind == VirtualDirSynthetic {
@@ -221,6 +279,7 @@ func (dir *DirINode) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 	}
 
 	entries := make([]fuse.Dirent, 0, len(allAttrs))
+	collision := false
 	for _, a := range allAttrs {
 		if dir.FileSystem.IsPathAllowed(dir.AbsolutePathForChild(a.Name)) {
 			// Creating Dirent structure as required by FUSE
@@ -231,12 +290,21 @@ func (dir *DirINode) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 			// Speculatively pre-creating child Dir or File node with cached attributes,
 			// since it's highly likely that we will have Lookup() call for this name
 			// This is the key trick which dramatically speeds up 'ls'
+			if dir.Parent == nil && dir.FileSystem.HasVirtualDirectory() && a.Name == dir.FileSystem.VirtualDirectoryName {
+				collision = true
+				dir.removeChildInode(ReadDir, a.Name)
+			}
 			dir.addOrUpdateChildInodeAttrs(ReadDir, a.Name, a)
 		}
 	}
 
 	if dir.Parent == nil && dir.FileSystem.HasVirtualDirectory() {
-		if child := dir.ensureVirtualDirectoryRootChild(ReadDir); child != nil {
+		dir.VirtualRootCollision = collision
+		if !collision {
+			child, err := dir.ensureVirtualDirectoryRootChild(ReadDir)
+			if err != nil {
+				return nil, err
+			}
 			entries = append(entries, fuse.Dirent{
 				Inode: child.Attrs.Inode,
 				Name:  child.Attrs.Name,
@@ -253,6 +321,19 @@ func (dir *DirINode) readVirtualDirectoryEntries() ([]fuse.Dirent, error) {
 	for _, childName := range childNames {
 		childRelPath := path.Join(dir.VirtualRelPath, childName)
 		if dir.FileSystem.virtualDirectoryLeafExists(childRelPath) {
+			if node := dir.getChildInode(ReadDir, childName); node != nil && nodeAttrsFresh(node, dir.FileSystem.Clock.Now()) {
+				attrs, ok := nodeAttrs(node)
+				if !ok {
+					return nil, fmt.Errorf("unexpected cached node type for %s", childName)
+				}
+				entries = append(entries, fuse.Dirent{
+					Inode: attrs.Inode,
+					Name:  childName,
+					Type:  attrs.FuseNodeType(),
+				})
+				continue
+			}
+
 			var attrs Attrs
 			node, err := dir.statInodeInHopsFS(ReadDir, childName, &attrs)
 			if err != nil {
@@ -267,20 +348,19 @@ func (dir *DirINode) readVirtualDirectoryEntries() ([]fuse.Dirent, error) {
 			continue
 		}
 
-		attrs := dir.syntheticDirectoryAttrs(
+		child, err := dir.ensureSyntheticDirectoryChild(
+			ReadDir,
 			childRelPath,
 			childName,
 			dir.FileSystem.VirtualDirectoryPath(childRelPath),
+			dir.FileSystem.VirtualDirectoryPath(childRelPath),
 			dir.Attrs,
 		)
-		child := dir.addOrUpdateChildInodeAttrs(ReadDir, childName, attrs)
-		if dnode, ok := child.(*DirINode); ok {
-			dnode.VirtualKind = VirtualDirSynthetic
-			dnode.VirtualRelPath = childRelPath
-			dnode.BackendPath = dir.FileSystem.VirtualDirectoryPath(childRelPath)
+		if err != nil {
+			return nil, err
 		}
 		entries = append(entries, fuse.Dirent{
-			Inode: attrs.Inode,
+			Inode: child.Attrs.Inode,
 			Name:  childName,
 			Type:  fuse.DT_Dir,
 		})
@@ -288,19 +368,20 @@ func (dir *DirINode) readVirtualDirectoryEntries() ([]fuse.Dirent, error) {
 	return entries, nil
 }
 
-func (dir *DirINode) ensureVirtualDirectoryRootChild(operation string) *DirINode {
-	attrs := dir.syntheticDirectoryAttrs(
+func (dir *DirINode) ensureVirtualDirectoryRootChild(operation string) (*DirINode, error) {
+	child, err := dir.ensureSyntheticDirectoryChild(
+		operation,
 		"",
 		dir.FileSystem.VirtualDirectoryName,
+		dir.FileSystem.VirtualDirectoryBackendRoot,
 		dir.FileSystem.SrcDir,
 		dir.Attrs,
 	)
-	node := dir.addOrUpdateChildInodeAttrs(operation, attrs.Name, attrs)
-	dnode := node.(*DirINode)
-	dnode.VirtualKind = VirtualDirSynthetic
-	dnode.VirtualRelPath = ""
-	dnode.BackendPath = dir.FileSystem.VirtualDirectoryBackendRoot
-	return dnode
+	if err != nil {
+		return nil, err
+	}
+	child.VirtualRootCollision = dir.VirtualRootCollision
+	return child, nil
 }
 
 func (dir *DirINode) lookupVirtualDirectoryChild(operation, name string) (fs.Node, error) {
@@ -310,24 +391,51 @@ func (dir *DirINode) lookupVirtualDirectoryChild(operation, name string) (fs.Nod
 	}
 
 	if dir.FileSystem.virtualDirectoryLeafExists(childRelPath) {
+		if node := dir.getChildInode(operation, name); node != nil && nodeAttrsFresh(node, dir.FileSystem.Clock.Now()) {
+			return node, nil
+		}
 		return dir.statInodeInHopsFS(operation, name, &Attrs{})
 	}
 
-	attrs := dir.syntheticDirectoryAttrs(
+	child, err := dir.ensureSyntheticDirectoryChild(
+		operation,
 		childRelPath,
 		name,
 		dir.FileSystem.VirtualDirectoryPath(childRelPath),
+		dir.FileSystem.VirtualDirectoryPath(childRelPath),
 		dir.Attrs,
 	)
+	if err != nil {
+		return nil, err
+	}
+	return child, nil
+}
+
+func (dir *DirINode) ensureSyntheticDirectoryChild(operation string, relPath, name, backendPath, statPath string, fallback Attrs) (*DirINode, error) {
+	attrs, err := dir.syntheticDirectoryAttrs(operation, relPath, name, statPath, fallback)
+	if err != nil {
+		return nil, err
+	}
+
 	node := dir.addOrUpdateChildInodeAttrs(operation, name, attrs)
-	dnode := node.(*DirINode)
+	dnode, ok := node.(*DirINode)
+	if !ok {
+		return nil, fmt.Errorf("virtual directory path %q resolved to non-directory backend node", statPath)
+	}
 	dnode.VirtualKind = VirtualDirSynthetic
-	dnode.VirtualRelPath = childRelPath
-	dnode.BackendPath = dir.FileSystem.VirtualDirectoryPath(childRelPath)
+	dnode.VirtualRelPath = relPath
+	dnode.BackendPath = backendPath
+	dnode.VirtualStatPath = statPath
 	return dnode, nil
 }
 
-func (dir *DirINode) syntheticDirectoryAttrs(relPath, name, statPath string, fallback Attrs) Attrs {
+func (dir *DirINode) syntheticDirectoryAttrs(operation, relPath, name, statPath string, fallback Attrs) (Attrs, error) {
+	if node := dir.getChildInode(operation, name); node != nil {
+		if cachedDir, ok := node.(*DirINode); ok && cachedDir.VirtualKind == VirtualDirSynthetic && cachedDir.VirtualStatPath == statPath && !dir.FileSystem.Clock.Now().After(cachedDir.Attrs.Expires) {
+			return cachedDir.Attrs, nil
+		}
+	}
+
 	attrs := Attrs{
 		Name:  name,
 		Mode:  os.ModeDir | 0755,
@@ -339,19 +447,69 @@ func (dir *DirINode) syntheticDirectoryAttrs(relPath, name, statPath string, fal
 	}
 
 	if statPath != "" {
-		if backendAttrs, err := dir.FileSystem.getDFSConnector().Stat(statPath); err == nil {
-			attrs.Mode = backendAttrs.Mode
-			attrs.Uid = backendAttrs.Uid
-			attrs.Gid = backendAttrs.Gid
-			attrs.DFSUserName = backendAttrs.DFSUserName
-			attrs.DFSGroupName = backendAttrs.DFSGroupName
-			attrs.Mtime = backendAttrs.Mtime
-			attrs.Ctime = backendAttrs.Ctime
-			attrs.Size = backendAttrs.Size
+		backendAttrs, err := dir.FileSystem.getDFSConnector().Stat(statPath)
+		if err != nil {
+			return Attrs{}, err
 		}
+		if !backendAttrs.Mode.IsDir() {
+			return Attrs{}, fmt.Errorf("%s: virtual directory path %q is not a directory", operation, statPath)
+		}
+		attrs.Mode = backendAttrs.Mode
+		attrs.Uid = backendAttrs.Uid
+		attrs.Gid = backendAttrs.Gid
+		attrs.DFSUserName = backendAttrs.DFSUserName
+		attrs.DFSGroupName = backendAttrs.DFSGroupName
+		attrs.Mtime = backendAttrs.Mtime
+		attrs.Ctime = backendAttrs.Ctime
+		attrs.Size = backendAttrs.Size
+		attrs.Expires = backendAttrs.Expires
 	}
 
-	return attrs
+	if attrs.Expires.IsZero() {
+		attrs.Expires = dir.FileSystem.Clock.Now().Add(CacheAttrsTimeDuration)
+	}
+
+	return attrs, nil
+}
+
+func (dir *DirINode) refreshSyntheticAttrs() error {
+	if dir.VirtualStatPath == "" {
+		return nil
+	}
+
+	backendAttrs, err := dir.FileSystem.getDFSConnector().Stat(dir.VirtualStatPath)
+	if err != nil {
+		return err
+	}
+	if !backendAttrs.Mode.IsDir() {
+		return fmt.Errorf("virtual directory path %q is not a directory", dir.VirtualStatPath)
+	}
+	backendAttrs.Name = dir.Attrs.Name
+	backendAttrs.Inode = dir.Attrs.Inode
+	if backendAttrs.Expires.IsZero() {
+		backendAttrs.Expires = dir.FileSystem.Clock.Now().Add(CacheAttrsTimeDuration)
+	}
+	dir.Attrs = backendAttrs
+	return nil
+}
+
+func nodeAttrs(node fs.Node) (Attrs, bool) {
+	switch n := node.(type) {
+	case *DirINode:
+		return n.Attrs, true
+	case *FileINode:
+		return n.Attrs, true
+	default:
+		return Attrs{}, false
+	}
+}
+
+func nodeAttrsFresh(node fs.Node, now time.Time) bool {
+	attrs, ok := nodeAttrs(node)
+	if !ok {
+		return false
+	}
+	return !now.After(attrs.Expires)
 }
 
 func syntheticInode(key string) uint64 {

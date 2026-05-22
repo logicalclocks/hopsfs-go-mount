@@ -108,6 +108,155 @@ func TestVirtualRootIsDisabledWithoutConfiguration(t *testing.T) {
 	assert.Equal(t, []string{"dataset-a"}, direntNames(dirents))
 }
 
+func TestVirtualDirectoryConfigValidation(t *testing.T) {
+	mockClock := &MockClock{}
+
+	_, err := NewFileSystem(
+		nil,
+		"/Projects/current-project",
+		[]string{"*"},
+		false,
+		DelaySyncUntilClose,
+		NewDefaultRetryPolicy(mockClock),
+		mockClock,
+		WithVirtualDirectory("shared/datasets", []string{"other-project/shared-a"}, "/Projects"),
+	)
+	assert.Error(t, err)
+
+	_, err = NewFileSystem(
+		nil,
+		"/Projects/current-project",
+		[]string{"*"},
+		false,
+		DelaySyncUntilClose,
+		NewDefaultRetryPolicy(mockClock),
+		mockClock,
+		WithVirtualDirectory("shared-datasets", []string{"../secret"}, "/Projects"),
+	)
+	assert.Error(t, err)
+
+	_, err = NewFileSystem(
+		nil,
+		"/Projects/current-project",
+		[]string{"*"},
+		false,
+		DelaySyncUntilClose,
+		NewDefaultRetryPolicy(mockClock),
+		mockClock,
+		WithVirtualDirectory("shared-datasets", []string{"other-project/shared-a"}, "Projects"),
+	)
+	assert.Error(t, err)
+}
+
+func TestVirtualRootCollisionPrefersBackendEntry(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	mockClock := &MockClock{}
+	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
+	hdfsAccessor.EXPECT().IsAvailable().Return(true).AnyTimes()
+
+	fs, _ := NewFileSystem(
+		[]HdfsAccessor{hdfsAccessor},
+		"/Projects/current-project",
+		[]string{"*"},
+		false,
+		DelaySyncUntilClose,
+		NewDefaultRetryPolicy(mockClock),
+		mockClock,
+		WithVirtualDirectory("shared-datasets", []string{"other-project/shared-a"}, "/Projects"),
+	)
+	root, _ := fs.Root()
+
+	hdfsAccessor.EXPECT().Stat("/Projects/current-project/shared-datasets").Return(Attrs{}, syscall.ENOENT)
+	hdfsAccessor.EXPECT().Stat("/Projects/current-project").Return(Attrs{
+		Name:    "current-project",
+		Mode:    os.ModeDir | 0770,
+		Uid:     111,
+		Gid:     222,
+		Expires: mockClock.Now().Add(CacheAttrsTimeDuration),
+	}, nil)
+	synthetic, err := root.(*DirINode).Lookup(nil, "shared-datasets")
+	assert.Nil(t, err)
+	assert.Equal(t, VirtualDirSynthetic, synthetic.(*DirINode).VirtualKind)
+
+	hdfsAccessor.EXPECT().ReadDir("/Projects/current-project").Return([]Attrs{
+		{
+			Name:    "dataset-a",
+			Mode:    os.ModeDir,
+			Expires: mockClock.Now().Add(CacheAttrsTimeDuration),
+		},
+		{
+			Name:    "shared-datasets",
+			Mode:    os.ModeDir | 0770,
+			Uid:     333,
+			Gid:     444,
+			Expires: mockClock.Now().Add(CacheAttrsTimeDuration),
+		},
+	}, nil)
+
+	dirents, err := root.(*DirINode).ReadDirAll(nil)
+	assert.Nil(t, err)
+	assert.Equal(t, []string{"dataset-a", "shared-datasets"}, direntNames(dirents))
+
+	node, err := root.(*DirINode).Lookup(nil, "shared-datasets")
+	assert.Nil(t, err)
+	collision := node.(*DirINode)
+	assert.Equal(t, VirtualDirNone, collision.VirtualKind)
+	assert.Equal(t, uint32(333), collision.Attrs.Uid)
+	assert.Equal(t, uint32(444), collision.Attrs.Gid)
+}
+
+func TestVirtualDirectoryMetadataIsCached(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	mockClock := &MockClock{}
+	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
+	hdfsAccessor.EXPECT().IsAvailable().Return(true).AnyTimes()
+
+	fs, _ := NewFileSystem(
+		[]HdfsAccessor{hdfsAccessor},
+		"/Projects/current-project",
+		[]string{"*"},
+		false,
+		DelaySyncUntilClose,
+		NewDefaultRetryPolicy(mockClock),
+		mockClock,
+		WithVirtualDirectory("shared-datasets", []string{"other-project/shared-a"}, "/Projects"),
+	)
+	root, _ := fs.Root()
+
+	hdfsAccessor.EXPECT().Stat("/Projects/current-project/shared-datasets").Return(Attrs{}, syscall.ENOENT)
+	hdfsAccessor.EXPECT().Stat("/Projects/current-project").Return(Attrs{
+		Name:    "current-project",
+		Mode:    os.ModeDir | 0770,
+		Uid:     111,
+		Gid:     222,
+		Expires: mockClock.Now().Add(CacheAttrsTimeDuration),
+	}, nil)
+	first, err := root.(*DirINode).Lookup(nil, "shared-datasets")
+	assert.Nil(t, err)
+	second, err := root.(*DirINode).Lookup(nil, "shared-datasets")
+	assert.Nil(t, err)
+	assert.Equal(t, first, second)
+
+	hdfsAccessor.EXPECT().Stat("/Projects/other-project").Return(Attrs{
+		Name:    "other-project",
+		Mode:    os.ModeDir | 0770,
+		Uid:     333,
+		Gid:     444,
+		Expires: mockClock.Now().Add(CacheAttrsTimeDuration),
+	}, nil)
+	sharedProject, err := first.(*DirINode).Lookup(nil, "other-project")
+	assert.Nil(t, err)
+	dirents, err := first.(*DirINode).ReadDirAll(nil)
+	assert.Nil(t, err)
+	assert.Equal(t, []string{"other-project"}, direntNames(dirents))
+	direntsAgain, err := first.(*DirINode).ReadDirAll(nil)
+	assert.Nil(t, err)
+	assert.Equal(t, []string{"other-project"}, direntNames(direntsAgain))
+	sharedProjectAgain, err := first.(*DirINode).Lookup(nil, "other-project")
+	assert.Nil(t, err)
+	assert.Equal(t, sharedProject, sharedProjectAgain)
+}
+
 func direntNames(dirents []fuse.Dirent) []string {
 	names := make([]string, 0, len(dirents))
 	for _, dirent := range dirents {

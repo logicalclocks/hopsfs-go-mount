@@ -52,7 +52,7 @@ type FileSystemOption func(*FileSystem)
 func WithVirtualDirectory(name string, paths []string, backendRoot string) FileSystemOption {
 	return func(filesystem *FileSystem) {
 		filesystem.VirtualDirectoryName = strings.TrimSpace(name)
-		filesystem.VirtualDirectoryPaths = normalizeVirtualDirectoryPaths(paths)
+		filesystem.VirtualDirectoryPaths = append([]string(nil), paths...)
 		if strings.TrimSpace(backendRoot) != "" {
 			filesystem.VirtualDirectoryBackendRoot = strings.TrimSpace(backendRoot)
 		}
@@ -76,6 +76,9 @@ func NewFileSystem(hdfsAccessors []HdfsAccessor, srcDir string, allowedPrefixes 
 			continue
 		}
 		opt(filesystem)
+	}
+	if err := filesystem.normalizeVirtualDirectoryConfig(); err != nil {
+		return nil, err
 	}
 	return filesystem, nil
 }
@@ -166,23 +169,120 @@ func (filesystem *FileSystem) IsPathAllowed(candidate string) bool {
 	return false
 }
 
-func normalizeVirtualDirectoryPaths(paths []string) []string {
+func (filesystem *FileSystem) normalizeVirtualDirectoryConfig() error {
+	if filesystem.VirtualDirectoryName == "" || len(filesystem.VirtualDirectoryPaths) == 0 {
+		filesystem.VirtualDirectoryName = ""
+		filesystem.VirtualDirectoryPaths = nil
+		if strings.TrimSpace(filesystem.VirtualDirectoryBackendRoot) == "" {
+			filesystem.VirtualDirectoryBackendRoot = "/Projects"
+		}
+		return nil
+	}
+
+	name, err := normalizeVirtualDirectoryName(filesystem.VirtualDirectoryName)
+	if err != nil {
+		return err
+	}
+
+	paths, err := normalizeVirtualDirectoryPaths(filesystem.VirtualDirectoryPaths)
+	if err != nil {
+		return err
+	}
+	if len(paths) == 0 {
+		filesystem.VirtualDirectoryName = ""
+		filesystem.VirtualDirectoryPaths = nil
+		if strings.TrimSpace(filesystem.VirtualDirectoryBackendRoot) == "" {
+			filesystem.VirtualDirectoryBackendRoot = "/Projects"
+		}
+		return nil
+	}
+
+	backendRoot, err := normalizeVirtualDirectoryBackendRoot(filesystem.VirtualDirectoryBackendRoot)
+	if err != nil {
+		return err
+	}
+
+	filesystem.VirtualDirectoryName = name
+	filesystem.VirtualDirectoryPaths = paths
+	filesystem.VirtualDirectoryBackendRoot = backendRoot
+	return nil
+}
+
+func normalizeVirtualDirectoryName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", nil
+	}
+	if strings.Contains(name, "/") {
+		return "", fmt.Errorf("invalid virtual directory name %q: must be a single path element", name)
+	}
+	if name == "." || name == ".." {
+		return "", fmt.Errorf("invalid virtual directory name %q: must not be . or ..", name)
+	}
+	return name, nil
+}
+
+func normalizeVirtualDirectoryPaths(paths []string) ([]string, error) {
 	result := make([]string, 0, len(paths))
 	seen := make(map[string]struct{})
 	for _, p := range paths {
-		p = strings.TrimSpace(p)
-		p = strings.Trim(p, "/")
-		if p == "" {
+		normalized, err := normalizeVirtualDirectoryPath(p)
+		if err != nil {
+			return nil, err
+		}
+		if normalized == "" {
 			continue
 		}
-		if _, ok := seen[p]; ok {
+		if _, ok := seen[normalized]; ok {
 			continue
 		}
-		seen[p] = struct{}{}
-		result = append(result, p)
+		seen[normalized] = struct{}{}
+		result = append(result, normalized)
 	}
 	sort.Strings(result)
-	return result
+	return result, nil
+}
+
+func normalizeVirtualDirectoryPath(rawPath string) (string, error) {
+	rawPath = strings.TrimSpace(rawPath)
+	if rawPath == "" {
+		return "", nil
+	}
+
+	trimmed := strings.Trim(rawPath, "/")
+	if trimmed == "" {
+		return "", nil
+	}
+
+	parts := strings.Split(trimmed, "/")
+	normalizedParts := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." {
+			return "", fmt.Errorf("invalid virtual directory path %q: path elements must not be empty, . or ..", rawPath)
+		}
+		normalizedParts = append(normalizedParts, part)
+	}
+
+	return strings.Join(normalizedParts, "/"), nil
+}
+
+func normalizeVirtualDirectoryBackendRoot(rawPath string) (string, error) {
+	rawPath = strings.TrimSpace(rawPath)
+	if rawPath == "" {
+		return "/Projects", nil
+	}
+	if rawPath == "/" {
+		return "/", nil
+	}
+	if !strings.HasPrefix(rawPath, "/") {
+		return "", fmt.Errorf("invalid virtual directory backend root %q: must be an absolute path", rawPath)
+	}
+
+	normalized, err := normalizeVirtualDirectoryPath(rawPath)
+	if err != nil {
+		return "", fmt.Errorf("invalid virtual directory backend root %q: %w", rawPath, err)
+	}
+	return "/" + normalized, nil
 }
 
 func (filesystem *FileSystem) HasVirtualDirectory() bool {
