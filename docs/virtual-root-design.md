@@ -19,6 +19,25 @@ The goal of this feature is to make `/hopsfs` the actual mount root and let the 
 - Preserve normal HopsFS semantics for lookup, permissions, and metadata
 - Avoid symlink-based assembly in the container image
 
+## Other opportunities
+
+This also makes it possible to mount non-project-specific datasets and show them under the single project subtree. For example, we can mount files under /hopsworks-tools in each project. hopsworks-tools is a virtual dataset
+
+/hopsfs > ls -la
+total 0
+drwxrwx--- 1 yarnapp hadoop 0 May 22 10:27 Airflow
+drwxrwx--- 1 yarnapp hadoop 0 May 22 10:27 DataValidation
+drwxrwx--- 1 yarnapp hadoop 0 May 22 10:27 Deployments
+drwxrwx--- 1 yarnapp hadoop 0 May 22 10:27 Jupyter
+drwxrwx--- 1 yarnapp hadoop 0 May 22 10:27 Logs
+drwxrwx--- 1 yarnapp hadoop 0 May 22 10:27 Models
+drwxrwx--- 1 yarnapp hadoop 0 May 22 10:27 Resources
+drwxrwx--- 1 yarnapp hadoop 0 May 22 10:27 Statistics
+drwxrwx--- 1 yarnapp hadoop 0 May 22 10:27 Users
+drwxrwx--- 1 yarnapp hadoop 0 May 22 10:27 g1_Training_Datasets
+dr-xr-xr-x 1 yarnapp hadoop 0 May 22 10:27 hopsworks-tools
+/hopsfs > 
+
 ## Non-goals
 
 - This is not a general union filesystem
