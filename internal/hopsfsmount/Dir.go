@@ -209,7 +209,7 @@ func (dir *DirINode) LookupInt(opName string, name string) (fs.Node, error) {
 					if !dir.VirtualRootCollision && now.Before(cached.Attrs.Expires) {
 						return cached, nil
 					}
-				} else if now.Before(cached.Attrs.Expires) {
+				} else if dir.VirtualRootCollision && now.Before(cached.Attrs.Expires) {
 					return cached, nil
 				}
 			case *FileINode:
@@ -318,10 +318,11 @@ func (dir *DirINode) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 func (dir *DirINode) readVirtualDirectoryEntries() ([]fuse.Dirent, error) {
 	childNames := dir.FileSystem.virtualDirectoryChildNames(dir.VirtualRelPath)
 	entries := make([]fuse.Dirent, 0, len(childNames))
+	now := dir.FileSystem.Clock.Now()
 	for _, childName := range childNames {
 		childRelPath := path.Join(dir.VirtualRelPath, childName)
 		if dir.FileSystem.virtualDirectoryLeafExists(childRelPath) {
-			if node := dir.getChildInode(ReadDir, childName); node != nil && nodeAttrsFresh(node, dir.FileSystem.Clock.Now()) {
+			if node := dir.getChildInode(ReadDir, childName); node != nil && nodeAttrsFresh(node, now) {
 				attrs, ok := nodeAttrs(node)
 				if !ok {
 					return nil, fmt.Errorf("unexpected cached node type for %s", childName)
@@ -334,17 +335,11 @@ func (dir *DirINode) readVirtualDirectoryEntries() ([]fuse.Dirent, error) {
 				continue
 			}
 
-			var attrs Attrs
-			node, err := dir.statInodeInHopsFS(ReadDir, childName, &attrs)
-			if err != nil {
-				return nil, err
-			}
 			entries = append(entries, fuse.Dirent{
-				Inode: attrs.Inode,
+				Inode: syntheticInode(path.Join("/", dir.FileSystem.VirtualDirectoryName, childRelPath)),
 				Name:  childName,
-				Type:  attrs.FuseNodeType(),
+				Type:  fuse.DT_Unknown,
 			})
-			_ = node
 			continue
 		}
 
@@ -412,6 +407,12 @@ func (dir *DirINode) lookupVirtualDirectoryChild(operation, name string) (fs.Nod
 }
 
 func (dir *DirINode) ensureSyntheticDirectoryChild(operation string, relPath, name, backendPath, statPath string, fallback Attrs) (*DirINode, error) {
+	if node := dir.getChildInode(operation, name); node != nil {
+		if cachedDir, ok := node.(*DirINode); !ok || cachedDir.VirtualKind != VirtualDirSynthetic || cachedDir.VirtualStatPath != statPath || cachedDir.BackendPath != backendPath {
+			dir.removeChildInode(operation, name)
+		}
+	}
+
 	attrs, err := dir.syntheticDirectoryAttrs(operation, relPath, name, statPath, fallback)
 	if err != nil {
 		return nil, err
@@ -512,6 +513,13 @@ func nodeAttrsFresh(node fs.Node, now time.Time) bool {
 	return !now.After(attrs.Expires)
 }
 
+func (dir *DirINode) virtualMutationAllowed(candidatePath string) bool {
+	if dir.VirtualKind != VirtualDirSynthetic {
+		return true
+	}
+	return dir.FileSystem.virtualDirectoryMutationAllowed(candidatePath)
+}
+
 func syntheticInode(key string) uint64 {
 	hasher := fnv.New64a()
 	_, _ = hasher.Write([]byte(key))
@@ -547,28 +555,34 @@ func (dir *DirINode) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node
 	dir.lockMutex()
 	defer dir.unlockMutex()
 
+	targetPath := dir.AbsolutePathForChild(req.Name)
+	if !dir.virtualMutationAllowed(targetPath) {
+		logger.Warn("Rejected mkdir outside configured virtual tree", logger.Fields{Operation: Mkdir, Path: targetPath})
+		return nil, syscall.EPERM
+	}
+
 	// check user and group information first.
 	userName, err := getUserName(req.Uid)
 	if err != nil {
 		logger.Error("Unable to find user information. ", logger.Fields{Operation: Mkdir,
-			Path: dir.AbsolutePathForChild(req.Name), UID: req.Uid, HopsFSUserName: GetConnectionUser()})
+			Path: targetPath, UID: req.Uid, HopsFSUserName: GetConnectionUser()})
 		return nil, err
 	}
 
 	groupName, err := getGroupName(dir.AbsolutePathForChild(req.Name), req.Gid)
 	if err != nil {
 		logger.Error("Unable to find group information. ", logger.Fields{Operation: Mkdir,
-			Path: dir.AbsolutePathForChild(req.Name), GID: req.Gid,
+			Path: targetPath, GID: req.Gid,
 			GetGroupFromHopsFSDatasetPath: UseGroupFromHopsFsDatasetPath})
 		return nil, err
 	}
 	req.Mode = ComputePermissions(req.Mode)
-	err = dir.FileSystem.getDFSConnector().MkdirWithGroup(dir.AbsolutePathForChild(req.Name), req.Mode, groupName)
+	err = dir.FileSystem.getDFSConnector().MkdirWithGroup(targetPath, req.Mode, groupName)
 	if err != nil {
-		logger.Info("mkdir failed", logger.Fields{Operation: Mkdir, Path: path.Join(dir.AbsolutePath(), req.Name), Error: err})
+		logger.Info("mkdir failed", logger.Fields{Operation: Mkdir, Path: targetPath, Error: err})
 		return nil, err
 	}
-	logger.Debug("mkdir successful with group", logger.Fields{Operation: Mkdir, Path: path.Join(dir.AbsolutePath(), req.Name), Group: groupName})
+	logger.Debug("mkdir successful with group", logger.Fields{Operation: Mkdir, Path: targetPath, Group: groupName})
 
 	dir.removeNegativeCacheEntry(req.Name)
 	newInode := dir.addOrUpdateChildInodeAttrs(Mkdir, req.Name,
@@ -589,20 +603,25 @@ func (dir *DirINode) Create(ctx context.Context, req *fuse.CreateRequest, resp *
 	defer dir.unlockMutex()
 
 	req.Mode = ComputePermissions(req.Mode)
-	logger.Info("Creating a new file", logger.Fields{Operation: Create, Path: dir.AbsolutePathForChild(req.Name), Mode: req.Mode, Flags: req.Flags})
+	targetPath := dir.AbsolutePathForChild(req.Name)
+	if !dir.virtualMutationAllowed(targetPath) {
+		logger.Warn("Rejected create outside configured virtual tree", logger.Fields{Operation: Create, Path: targetPath})
+		return nil, nil, syscall.EPERM
+	}
+	logger.Info("Creating a new file", logger.Fields{Operation: Create, Path: targetPath, Mode: req.Mode, Flags: req.Flags})
 
 	// first determine the usename and grup name for the new file
 	userName, err := getUserName(req.Uid)
 	if err != nil {
 		logger.Error("Unable to find user information. ", logger.Fields{Operation: Create,
-			Path: dir.AbsolutePathForChild(req.Name), UID: req.Uid, HopsFSUserName: GetConnectionUser()})
+			Path: targetPath, UID: req.Uid, HopsFSUserName: GetConnectionUser()})
 		return nil, nil, err
 	}
 
 	groupName, err := getGroupName(dir.AbsolutePathForChild(req.Name), req.Gid)
 	if err != nil {
 		logger.Error("Unable to find group information. ", logger.Fields{Operation: Create,
-			Path: dir.AbsolutePathForChild(req.Name), GID: req.Gid,
+			Path: targetPath, GID: req.Gid,
 			GetGroupFromHopsFSDatasetPath: UseGroupFromHopsFsDatasetPath})
 		return nil, nil, err
 	}
@@ -620,7 +639,7 @@ func (dir *DirINode) Create(ctx context.Context, req *fuse.CreateRequest, resp *
 	file := (dir.addOrUpdateChildInodeAttrs(Create, req.Name, newFileAttrs)).(*FileINode)
 	handle, err := file.NewFileHandle(false, req.Flags)
 	if err != nil {
-		logger.Error("File creation failed", logger.Fields{Operation: Create, Path: dir.AbsolutePathForChild(req.Name), Mode: req.Mode, Flags: req.Flags, Error: err})
+		logger.Error("File creation failed", logger.Fields{Operation: Create, Path: targetPath, Mode: req.Mode, Flags: req.Flags, Error: err})
 		dir.removeChildInode(Create, req.Name)
 		return nil, nil, err
 	}
@@ -628,7 +647,7 @@ func (dir *DirINode) Create(ctx context.Context, req *fuse.CreateRequest, resp *
 	// File created with groupname parameter - no chown needed
 	logger.Debug("File created with group", logger.Fields{
 		Operation: Create,
-		Path:      dir.AbsolutePathForChild(req.Name),
+		Path:      targetPath,
 		User:      userName,
 		Group:     groupName,
 	})
@@ -648,18 +667,23 @@ func (dir *DirINode) Remove(ctx context.Context, req *fuse.RemoveRequest) error 
 	dir.lockMutex()
 	defer dir.unlockMutex()
 
-	path := dir.AbsolutePathForChild(req.Name)
-	logger.Debug("Removing path", logger.Fields{Operation: Remove, Path: path})
-	err := dir.FileSystem.getDFSConnector().Remove(path)
+	targetPath := dir.AbsolutePathForChild(req.Name)
+	if !dir.virtualMutationAllowed(targetPath) {
+		logger.Warn("Rejected remove outside configured virtual tree", logger.Fields{Operation: Remove, Path: targetPath})
+		return syscall.EPERM
+	}
+
+	logger.Debug("Removing path", logger.Fields{Operation: Remove, Path: targetPath})
+	err := dir.FileSystem.getDFSConnector().Remove(targetPath)
 	if err == nil {
 		dir.removeChildInode(Remove, req.Name)
 		// Invalidate staging file cache for the removed path
 		if StagingCache != nil {
-			StagingCache.Remove(path)
+			StagingCache.Remove(targetPath)
 		}
-		logger.Info("Removed path", logger.Fields{Operation: Remove, Path: path})
+		logger.Info("Removed path", logger.Fields{Operation: Remove, Path: targetPath})
 	} else {
-		logger.Warn("Failed to remove path", logger.Fields{Operation: Remove, Path: path, Error: err})
+		logger.Warn("Failed to remove path", logger.Fields{Operation: Remove, Path: targetPath, Error: err})
 	}
 	return err
 }
@@ -676,6 +700,11 @@ func (srcParent *DirINode) renameInt(operationName, oldName, newName string, dst
 	oldPath := srcParent.AbsolutePathForChild(oldName)
 	newPath := dstParentDir.(*DirINode).AbsolutePathForChild(newName)
 	logger.Debug("Renaming", logger.Fields{Operation: operationName, From: oldPath, To: newPath})
+
+	if !srcParent.virtualMutationAllowed(oldPath) || !dstParentDir.(*DirINode).virtualMutationAllowed(newPath) {
+		logger.Warn("Rejected rename outside configured virtual tree", logger.Fields{Operation: operationName, From: oldPath, To: newPath})
+		return syscall.EPERM
+	}
 
 	srcInode, err := srcParent.LookupInt(Rename, oldName)
 	if err != nil {
@@ -759,6 +788,10 @@ func (dir *DirINode) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp
 	defer dir.unlockMutex()
 
 	path := dir.AbsolutePath()
+	if !dir.virtualMutationAllowed(path) {
+		logger.Warn("Rejected setattr outside configured virtual tree", logger.Fields{Operation: Chmod, Path: path})
+		return syscall.EPERM
+	}
 
 	if req.Valid.Size() {
 		logger.Error(fmt.Sprintf("Unsupported operation. Can not set size of a directory"), logger.Fields{Operation: Chmod, Path: path})

@@ -327,6 +327,57 @@ func (filesystem *FileSystem) virtualDirectoryLeafExists(relPath string) bool {
 	return false
 }
 
+func (filesystem *FileSystem) virtualDirectoryPathRelativeToBackendRoot(candidate string) (string, bool) {
+	if !filesystem.HasVirtualDirectory() {
+		return "", false
+	}
+
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" {
+		return "", false
+	}
+
+	candidate = path.Clean(candidate)
+	backendRoot := path.Clean(filesystem.VirtualDirectoryBackendRoot)
+
+	if backendRoot == "/" {
+		rel := strings.TrimPrefix(candidate, "/")
+		if rel == "" {
+			return "", false
+		}
+		return rel, true
+	}
+
+	if candidate == backendRoot {
+		return "", false
+	}
+
+	prefix := backendRoot + "/"
+	if !strings.HasPrefix(candidate, prefix) {
+		return "", false
+	}
+
+	rel := strings.TrimPrefix(candidate, prefix)
+	if rel == "" {
+		return "", false
+	}
+	return rel, true
+}
+
+func (filesystem *FileSystem) virtualDirectoryMutationAllowed(candidate string) bool {
+	relPath, ok := filesystem.virtualDirectoryPathRelativeToBackendRoot(candidate)
+	if !ok {
+		return false
+	}
+
+	for _, virtualPath := range filesystem.VirtualDirectoryPaths {
+		if relPath == virtualPath || strings.HasPrefix(relPath, virtualPath+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 func (filesystem *FileSystem) virtualDirectoryChildNames(relPath string) []string {
 	relPath = strings.Trim(relPath, "/")
 	children := make(map[string]struct{})

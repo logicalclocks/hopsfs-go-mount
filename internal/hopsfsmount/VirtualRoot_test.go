@@ -257,6 +257,44 @@ func TestVirtualDirectoryMetadataIsCached(t *testing.T) {
 	assert.Equal(t, sharedProject, sharedProjectAgain)
 }
 
+func TestVirtualDirectoryMutationsOutsideConfiguredLeavesAreRejected(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	mockClock := &MockClock{}
+	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
+	hdfsAccessor.EXPECT().IsAvailable().Return(true).AnyTimes()
+
+	fs, _ := NewFileSystem(
+		[]HdfsAccessor{hdfsAccessor},
+		"/Projects/current-project",
+		[]string{"*"},
+		false,
+		DelaySyncUntilClose,
+		NewDefaultRetryPolicy(mockClock),
+		mockClock,
+		WithVirtualDirectory("shared-datasets", []string{"other-project/shared-a"}, "/Projects"),
+	)
+	root, _ := fs.Root()
+
+	hdfsAccessor.EXPECT().Stat("/Projects/current-project/shared-datasets").Return(Attrs{}, syscall.ENOENT)
+	hdfsAccessor.EXPECT().Stat("/Projects/current-project").Return(Attrs{
+		Name:    "current-project",
+		Mode:    os.ModeDir | 0770,
+		Uid:     111,
+		Gid:     222,
+		Expires: mockClock.Now().Add(CacheAttrsTimeDuration),
+	}, nil)
+	sharedRoot, err := root.(*DirINode).Lookup(nil, "shared-datasets")
+	assert.Nil(t, err)
+
+	_, err = sharedRoot.(*DirINode).Mkdir(nil, &fuse.MkdirRequest{
+		Name: "other-project",
+		Mode: os.ModeDir | 0755,
+		Uid:  0,
+		Gid:  0,
+	})
+	assert.Equal(t, syscall.EPERM, err)
+}
+
 func direntNames(dirents []fuse.Dirent) []string {
 	names := make([]string, 0, len(dirents))
 	for _, dirent := range dirents {
