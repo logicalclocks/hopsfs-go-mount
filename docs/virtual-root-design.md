@@ -7,9 +7,9 @@ Status: implemented in `hopsfs-go-mount`
 To support shared datasets, HopsFS is mounted under `/mnt/hopsfs` and then reshaped with local symlinks (for each project dataset) to expose a nicer `/hopsfs` view that also shows the shared-datasets. That approach had two problems:
 
 - directory listings under the symlinked tree did not refresh the newly created Datasets in the project (Big problem)
-- Python directories like os.getcwd() including path resolution for files points to /mnt/hopsfs instead of /hopsfs which is confusing for users
+- Python directives like `os.getcwd()` including path resolution for files points to /mnt/hopsfs instead of /hopsfs which is confusing for users
 
-The goal of this feature is to make `/hopsfs` the actual mount root and let the mount expose a synthetic top-level directory that can aggregate selected backend paths from multiple projects.
+The goal of this feature is to make `/hopsfs` the actual mount root and let the mount expose a synthetic top-level directory that can aggregate selected backend paths from multiple projects or other non project dirs within hopsfs.
 
 ## Goals
 
