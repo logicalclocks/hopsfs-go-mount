@@ -29,9 +29,10 @@ type FileSystem struct {
 	hdfsAccessorsIndex          int
 	SrcDir                      string   // Src directory that will mounted
 	AllowedPrefixes             []string // List of allowed path prefixes (only those prefixes are exposed via mountpoint)
-	VirtualDirectoryName        string   // Optional synthetic directory exposed at the mount root
-	VirtualDirectoryPaths       []string // Relative paths exposed inside the synthetic directory
-	VirtualDirectoryBackendRoot string   // Backend root used to resolve virtual directory paths
+	VirtualDirectories          []VirtualDirectoryConfig
+	VirtualDirectoryName        string   // Legacy single-root compatibility input
+	VirtualDirectoryPaths       []string // Legacy single-root compatibility input
+	VirtualDirectoryBackendRoot string   // Legacy single-root compatibility input
 	ReadOnly                    bool     // Indicates whether mount filesystem with readonly
 	DelaySyncUntilClose         bool     // If true, ignore sync/flush operations until file close
 	Mounted                     bool     // True if filesystem is mounted
@@ -43,20 +44,30 @@ type FileSystem struct {
 	closeOnUnmountLock sync.Mutex  // mutex to protet closeOnUnmount
 }
 
+type VirtualDirectoryConfig struct {
+	Name        string   `json:"name"`
+	Paths       []string `json:"paths"`
+	BackendRoot string   `json:"backendRoot"`
+}
+
 // Verify that *FileSystem implements necesary FUSE interfaces
 var _ fs.FS = (*FileSystem)(nil)
 var _ fs.FSStatfser = (*FileSystem)(nil)
 
 type FileSystemOption func(*FileSystem)
 
-func WithVirtualDirectory(name string, paths []string, backendRoot string) FileSystemOption {
+func WithVirtualDirectories(configs []VirtualDirectoryConfig) FileSystemOption {
 	return func(filesystem *FileSystem) {
-		filesystem.VirtualDirectoryName = strings.TrimSpace(name)
-		filesystem.VirtualDirectoryPaths = append([]string(nil), paths...)
-		if strings.TrimSpace(backendRoot) != "" {
-			filesystem.VirtualDirectoryBackendRoot = strings.TrimSpace(backendRoot)
-		}
+		filesystem.VirtualDirectories = append([]VirtualDirectoryConfig(nil), configs...)
 	}
+}
+
+func WithVirtualDirectory(name string, paths []string, backendRoot string) FileSystemOption {
+	return WithVirtualDirectories([]VirtualDirectoryConfig{{
+		Name:        strings.TrimSpace(name),
+		Paths:       append([]string(nil), paths...),
+		BackendRoot: strings.TrimSpace(backendRoot),
+	}})
 }
 
 // Creates an instance of mountable file system
@@ -155,57 +166,12 @@ func (filesystem *FileSystem) IsPathAllowed(candidate string) bool {
 		}
 	}
 
-	if filesystem.HasVirtualDirectory() {
-		if candidate == path.Join("/", filesystem.VirtualDirectoryName) {
+	for _, virtualDirectory := range filesystem.VirtualDirectories {
+		if virtualDirectory.isPathAllowed(candidate) {
 			return true
-		}
-		for _, virtualPath := range filesystem.VirtualDirectoryPaths {
-			virtualCandidate := filesystem.VirtualDirectoryPath(virtualPath)
-			if virtualCandidate == candidate || strings.HasPrefix(candidate, virtualCandidate+"/") {
-				return true
-			}
 		}
 	}
 	return false
-}
-
-func (filesystem *FileSystem) normalizeVirtualDirectoryConfig() error {
-	if filesystem.VirtualDirectoryName == "" || len(filesystem.VirtualDirectoryPaths) == 0 {
-		filesystem.VirtualDirectoryName = ""
-		filesystem.VirtualDirectoryPaths = nil
-		if strings.TrimSpace(filesystem.VirtualDirectoryBackendRoot) == "" {
-			filesystem.VirtualDirectoryBackendRoot = "/Projects"
-		}
-		return nil
-	}
-
-	name, err := normalizeVirtualDirectoryName(filesystem.VirtualDirectoryName)
-	if err != nil {
-		return err
-	}
-
-	paths, err := normalizeVirtualDirectoryPaths(filesystem.VirtualDirectoryPaths)
-	if err != nil {
-		return err
-	}
-	if len(paths) == 0 {
-		filesystem.VirtualDirectoryName = ""
-		filesystem.VirtualDirectoryPaths = nil
-		if strings.TrimSpace(filesystem.VirtualDirectoryBackendRoot) == "" {
-			filesystem.VirtualDirectoryBackendRoot = "/Projects"
-		}
-		return nil
-	}
-
-	backendRoot, err := normalizeVirtualDirectoryBackendRoot(filesystem.VirtualDirectoryBackendRoot)
-	if err != nil {
-		return err
-	}
-
-	filesystem.VirtualDirectoryName = name
-	filesystem.VirtualDirectoryPaths = paths
-	filesystem.VirtualDirectoryBackendRoot = backendRoot
-	return nil
 }
 
 func normalizeVirtualDirectoryName(name string) (string, error) {
@@ -286,30 +252,172 @@ func normalizeVirtualDirectoryBackendRoot(rawPath string) (string, error) {
 }
 
 func (filesystem *FileSystem) HasVirtualDirectory() bool {
-	return filesystem.VirtualDirectoryName != "" && len(filesystem.VirtualDirectoryPaths) > 0
+	return len(filesystem.VirtualDirectories) > 0
+}
+
+func (filesystem *FileSystem) HasVirtualDirectories() bool {
+	return filesystem.HasVirtualDirectory()
+}
+
+func (filesystem *FileSystem) firstVirtualDirectoryConfig() (VirtualDirectoryConfig, bool) {
+	if len(filesystem.VirtualDirectories) == 0 {
+		return VirtualDirectoryConfig{}, false
+	}
+	return filesystem.VirtualDirectories[0], true
+}
+
+func (filesystem *FileSystem) virtualDirectoryConfigByName(name string) (VirtualDirectoryConfig, bool) {
+	for _, virtualDirectory := range filesystem.VirtualDirectories {
+		if virtualDirectory.Name == name {
+			return virtualDirectory, true
+		}
+	}
+	return VirtualDirectoryConfig{}, false
+}
+
+func (filesystem *FileSystem) normalizeVirtualDirectoryConfig() error {
+	if len(filesystem.VirtualDirectories) == 0 && (filesystem.VirtualDirectoryName != "" || len(filesystem.VirtualDirectoryPaths) > 0) {
+		filesystem.VirtualDirectories = []VirtualDirectoryConfig{{
+			Name:        filesystem.VirtualDirectoryName,
+			Paths:       append([]string(nil), filesystem.VirtualDirectoryPaths...),
+			BackendRoot: filesystem.VirtualDirectoryBackendRoot,
+		}}
+	}
+
+	normalized, err := normalizeVirtualDirectoryConfigs(filesystem.VirtualDirectories)
+	if err != nil {
+		return err
+	}
+	filesystem.VirtualDirectories = normalized
+
+	if len(filesystem.VirtualDirectories) > 0 {
+		first := filesystem.VirtualDirectories[0]
+		filesystem.VirtualDirectoryName = first.Name
+		filesystem.VirtualDirectoryPaths = append([]string(nil), first.Paths...)
+		filesystem.VirtualDirectoryBackendRoot = first.BackendRoot
+	} else {
+		filesystem.VirtualDirectoryName = ""
+		filesystem.VirtualDirectoryPaths = nil
+		if strings.TrimSpace(filesystem.VirtualDirectoryBackendRoot) == "" {
+			filesystem.VirtualDirectoryBackendRoot = "/Projects"
+		}
+	}
+	return nil
+}
+
+func normalizeVirtualDirectoryConfigs(configs []VirtualDirectoryConfig) ([]VirtualDirectoryConfig, error) {
+	normalized := make([]VirtualDirectoryConfig, 0, len(configs))
+	seenNames := make(map[string]struct{})
+	for _, config := range configs {
+		name, err := normalizeVirtualDirectoryName(config.Name)
+		if err != nil {
+			return nil, err
+		}
+		paths, err := normalizeVirtualDirectoryPaths(config.Paths)
+		if err != nil {
+			return nil, err
+		}
+		if name == "" || len(paths) == 0 {
+			continue
+		}
+		if _, ok := seenNames[name]; ok {
+			return nil, fmt.Errorf("duplicate virtual directory name %q", name)
+		}
+		backendRoot, err := normalizeVirtualDirectoryBackendRoot(config.BackendRoot)
+		if err != nil {
+			return nil, err
+		}
+		normalized = append(normalized, VirtualDirectoryConfig{
+			Name:        name,
+			Paths:       paths,
+			BackendRoot: backendRoot,
+		})
+		seenNames[name] = struct{}{}
+	}
+	sort.Slice(normalized, func(i, j int) bool {
+		return normalized[i].Name < normalized[j].Name
+	})
+	return normalized, nil
 }
 
 func (filesystem *FileSystem) VirtualDirectoryPath(relPath string) string {
+	if virtualDirectory, ok := filesystem.firstVirtualDirectoryConfig(); ok {
+		return virtualDirectory.Path(relPath)
+	}
+	backendRoot, err := normalizeVirtualDirectoryBackendRoot(filesystem.VirtualDirectoryBackendRoot)
+	if err != nil {
+		return "/Projects"
+	}
 	relPath = strings.Trim(relPath, "/")
 	if relPath == "" {
-		return path.Clean(filesystem.VirtualDirectoryBackendRoot)
+		return path.Clean(backendRoot)
 	}
-	return path.Join(filesystem.VirtualDirectoryBackendRoot, relPath)
+	return path.Join(backendRoot, relPath)
 }
 
 func (filesystem *FileSystem) VirtualDirectoryRootPath() string {
-	if filesystem.VirtualDirectoryName == "" {
-		return ""
+	if virtualDirectory, ok := filesystem.firstVirtualDirectoryConfig(); ok {
+		return virtualDirectory.RootPath()
 	}
-	return path.Join("/", filesystem.VirtualDirectoryName)
+	return ""
 }
 
 func (filesystem *FileSystem) virtualDirectoryRelPathExists(relPath string) bool {
+	if virtualDirectory, ok := filesystem.firstVirtualDirectoryConfig(); ok {
+		return virtualDirectory.relPathExists(relPath)
+	}
+	return false
+}
+
+func (filesystem *FileSystem) virtualDirectoryLeafExists(relPath string) bool {
+	if virtualDirectory, ok := filesystem.firstVirtualDirectoryConfig(); ok {
+		return virtualDirectory.leafExists(relPath)
+	}
+	return false
+}
+
+func (filesystem *FileSystem) virtualDirectoryPathRelativeToBackendRoot(candidate string) (string, bool) {
+	if virtualDirectory, ok := filesystem.firstVirtualDirectoryConfig(); ok {
+		return virtualDirectory.pathRelativeToBackendRoot(candidate)
+	}
+	return "", false
+}
+
+func (filesystem *FileSystem) virtualDirectoryMutationAllowed(candidate string) bool {
+	if virtualDirectory, ok := filesystem.firstVirtualDirectoryConfig(); ok {
+		return virtualDirectory.mutationAllowed(candidate)
+	}
+	return false
+}
+
+func (filesystem *FileSystem) virtualDirectoryChildNames(relPath string) []string {
+	if virtualDirectory, ok := filesystem.firstVirtualDirectoryConfig(); ok {
+		return virtualDirectory.childNames(relPath)
+	}
+	return nil
+}
+
+func (config VirtualDirectoryConfig) RootPath() string {
+	if config.Name == "" {
+		return ""
+	}
+	return path.Join("/", config.Name)
+}
+
+func (config VirtualDirectoryConfig) Path(relPath string) string {
+	relPath = strings.Trim(relPath, "/")
+	if relPath == "" {
+		return path.Clean(config.BackendRoot)
+	}
+	return path.Join(config.BackendRoot, relPath)
+}
+
+func (config VirtualDirectoryConfig) relPathExists(relPath string) bool {
 	relPath = strings.Trim(relPath, "/")
 	if relPath == "" {
 		return false
 	}
-	for _, candidate := range filesystem.VirtualDirectoryPaths {
+	for _, candidate := range config.Paths {
 		if candidate == relPath || strings.HasPrefix(candidate, relPath+"/") {
 			return true
 		}
@@ -317,9 +425,9 @@ func (filesystem *FileSystem) virtualDirectoryRelPathExists(relPath string) bool
 	return false
 }
 
-func (filesystem *FileSystem) virtualDirectoryLeafExists(relPath string) bool {
+func (config VirtualDirectoryConfig) leafExists(relPath string) bool {
 	relPath = strings.Trim(relPath, "/")
-	for _, candidate := range filesystem.VirtualDirectoryPaths {
+	for _, candidate := range config.Paths {
 		if candidate == relPath {
 			return true
 		}
@@ -327,18 +435,14 @@ func (filesystem *FileSystem) virtualDirectoryLeafExists(relPath string) bool {
 	return false
 }
 
-func (filesystem *FileSystem) virtualDirectoryPathRelativeToBackendRoot(candidate string) (string, bool) {
-	if !filesystem.HasVirtualDirectory() {
-		return "", false
-	}
-
+func (config VirtualDirectoryConfig) pathRelativeToBackendRoot(candidate string) (string, bool) {
 	candidate = strings.TrimSpace(candidate)
 	if candidate == "" {
 		return "", false
 	}
 
 	candidate = path.Clean(candidate)
-	backendRoot := path.Clean(filesystem.VirtualDirectoryBackendRoot)
+	backendRoot := path.Clean(config.BackendRoot)
 
 	if backendRoot == "/" {
 		rel := strings.TrimPrefix(candidate, "/")
@@ -364,13 +468,13 @@ func (filesystem *FileSystem) virtualDirectoryPathRelativeToBackendRoot(candidat
 	return rel, true
 }
 
-func (filesystem *FileSystem) virtualDirectoryMutationAllowed(candidate string) bool {
-	relPath, ok := filesystem.virtualDirectoryPathRelativeToBackendRoot(candidate)
+func (config VirtualDirectoryConfig) mutationAllowed(candidate string) bool {
+	relPath, ok := config.pathRelativeToBackendRoot(candidate)
 	if !ok {
 		return false
 	}
 
-	for _, virtualPath := range filesystem.VirtualDirectoryPaths {
+	for _, virtualPath := range config.Paths {
 		if relPath == virtualPath || strings.HasPrefix(relPath, virtualPath+"/") {
 			return true
 		}
@@ -378,14 +482,31 @@ func (filesystem *FileSystem) virtualDirectoryMutationAllowed(candidate string) 
 	return false
 }
 
-func (filesystem *FileSystem) virtualDirectoryChildNames(relPath string) []string {
+func (config VirtualDirectoryConfig) isPathAllowed(candidate string) bool {
+	if candidate == config.RootPath() {
+		return true
+	}
+	relPath, ok := config.pathRelativeToBackendRoot(candidate)
+	if !ok {
+		return false
+	}
+
+	for _, virtualPath := range config.Paths {
+		if relPath == virtualPath || strings.HasPrefix(relPath, virtualPath+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func (config VirtualDirectoryConfig) childNames(relPath string) []string {
 	relPath = strings.Trim(relPath, "/")
 	children := make(map[string]struct{})
 	prefix := relPath
 	if prefix != "" {
 		prefix += "/"
 	}
-	for _, candidate := range filesystem.VirtualDirectoryPaths {
+	for _, candidate := range config.Paths {
 		if relPath == "" {
 			parts := strings.Split(candidate, "/")
 			if len(parts) > 0 && parts[0] != "" {

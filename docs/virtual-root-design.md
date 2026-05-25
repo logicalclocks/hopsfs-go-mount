@@ -1,42 +1,20 @@
-# Configurable Virtual Root for HopsFS Mount
+# Configurable Virtual Roots for HopsFS Mount
 
-Status: implemented in `hopsfs-go-mount`
+Status: implemented in `hopsfs-go-mount` and wired through `hopsworks-ee`
 
 ## Problem
 
-To support shared datasets, HopsFS is mounted under `/mnt/hopsfs` and then reshaped with local symlinks (for each project dataset) to expose a nicer `/hopsfs` view that also shows the shared-datasets. That approach had two problems:
+HopsFS used to be mounted under `/mnt/hopsfs` and then reshaped with local symlinks to present a nicer `/hopsfs` layout. That solved the visible-path problem, but it also introduced stale directory listings and made the user-visible path depend on a container-side indirection.
 
-- directory listings under the symlinked tree did not refresh the newly created Datasets in the project (Big problem)
-- Python directives like `os.getcwd()` including path resolution for files points to /mnt/hopsfs instead of /hopsfs which is confusing for users
-
-The goal of this feature is to make `/hopsfs` the actual mount root and let the mount expose a synthetic top-level directory that can aggregate selected backend paths from multiple projects or other non project dirs within hopsfs.
+The goal of this feature is to make `/hopsfs` the real mount root and let the mount itself expose one or more synthetic top-level directories that aggregate selected backend paths.
 
 ## Goals
 
 - Mount the filesystem directly on `/hopsfs`
-- Expose a configurable synthetic directory at the root, instead of hardcoding `shared-datasets`
-- Show user-selected backend paths inside that synthetic directory
+- Expose configurable synthetic directories at the mount root
+- Allow each synthetic directory to map to one or more backend paths
 - Preserve normal HopsFS semantics for lookup, permissions, and metadata
 - Avoid symlink-based assembly in the container image
-
-## Other opportunities
-
-This also makes it possible to mount non-project-specific datasets and show them under the single project subtree. For example, we can mount files under /hopsworks-tools in each project. hopsworks-tools is a virtual dataset
-
-/hopsfs > ls -la
-total 0
-drwxrwx--- 1 yarnapp hadoop 0 May 22 10:27 Airflow
-drwxrwx--- 1 yarnapp hadoop 0 May 22 10:27 DataValidation
-drwxrwx--- 1 yarnapp hadoop 0 May 22 10:27 Deployments
-drwxrwx--- 1 yarnapp hadoop 0 May 22 10:27 Jupyter
-drwxrwx--- 1 yarnapp hadoop 0 May 22 10:27 Logs
-drwxrwx--- 1 yarnapp hadoop 0 May 22 10:27 Models
-drwxrwx--- 1 yarnapp hadoop 0 May 22 10:27 Resources
-drwxrwx--- 1 yarnapp hadoop 0 May 22 10:27 Statistics
-drwxrwx--- 1 yarnapp hadoop 0 May 22 10:27 Users
-drwxrwx--- 1 yarnapp hadoop 0 May 22 10:27 g1_Training_Datasets
-dr-xr-xr-x 1 yarnapp hadoop 0 May 22 10:27 hopsworks-tools
-/hopsfs > 
 
 ## Non-goals
 
@@ -46,90 +24,123 @@ dr-xr-xr-x 1 yarnapp hadoop 0 May 22 10:27 hopsworks-tools
 
 ## Configuration Model
 
-The mount accepts three pieces of virtual-root configuration:
+The configuration is driven from Hopsworks EE through the typed settings key
+`Settings.HopsworksSettingKeys.HOPSFS_MOUNT_VIRTUAL_DIRECTORIES`
+(`hopsfsmount_virtual_directories` in the database).
 
-- `virtualDirectoryName`: the synthetic directory name shown at the mount root
-- `virtualDirectoryPaths`: the backend-relative paths to expose under that directory
-- `virtualDirectoryBackendRoot`: the backend root used to resolve those relative paths
+Hopsworks renders that setting into the `VIRTUAL_DIRECTORIES` environment
+variable for `hopsfs-mount`.
 
-The feature is optional. If the virtual directory is not configured, the mount behaves like a normal single-root HopsFS mount.
-
-Example:
+The format is a compact semicolon-separated spec:
 
 ```text
-virtualDirectoryName = shared-datasets
-virtualDirectoryBackendRoot = /Projects
-virtualDirectoryPaths = projectA/shared-datasets, projectB/shared-datasets
+<virtual-dataset-name>:<backend-dirs>[;<virtual-dataset-name>:<backend-dirs>...]
 ```
 
-In that example, `/hopsfs/shared-datasets` becomes a synthetic directory that contains the configured project subtrees.
+Examples:
+
+```text
+shared-datasets:source-a/dataset-a,source-b/dataset-b
+shared-datasets:source-a/dataset-a,source-b/dataset-b;shared-data:/shared-data,/apps
+```
+
+Rules:
+
+- Each entry defines one synthetic directory at the mount root.
+- The name is the visible directory name, for example `shared-datasets`.
+- The backend directories are comma-separated.
+- Relative backend directories are resolved under `/Projects`.
+- Absolute backend directories are resolved from `/`.
+- Do not mix absolute and relative backend directories within the same entry.
+
+For backward compatibility, `hopsfs-go-mount` still accepts the legacy
+single-root inputs (`VIRTUAL_DIRECTORY_NAME`, `VIRTUAL_DIRECTORY_PATHS`, and
+`VIRTUAL_DIRECTORY_BACKEND_ROOT`) if `VIRTUAL_DIRECTORIES` is not set.
 
 ## Directory Layout
 
 The mount root is the real entry point presented to applications. It contains:
 
 - the normal backend root children
-- the synthetic virtual directory, if configured
+- one entry per configured virtual directory
 
-The synthetic directory is not implemented as a symlink. It is a virtual FUSE inode with explicit lookup and read logic.
+Each synthetic directory is a real FUSE inode, not a symlink. That means it can
+participate in lookup, listing, and permission checks without relying on the
+container filesystem.
 
 ## Read Behavior
 
-Root `ReadDirAll()` merges the real backend children with the synthetic directory entry when the feature is enabled.
+Root `ReadDirAll()` merges the real backend children with all configured
+synthetic root entries.
 
-Inside the synthetic directory:
+Inside a synthetic directory:
 
 - branch nodes are synthesized from the configured path prefixes
-- leaf nodes are exposed as placeholder entries and resolved lazily
+- leaf nodes are exposed lazily so repeated directory reads do not require a
+  backend stat for every leaf
 
-This avoids a stat call for every leaf during directory reads and keeps the synthetic tree responsive even when it contains many entries.
+This keeps the synthetic trees responsive even when they expose many entries.
 
 ## Lookup Behavior
 
 Lookup resolution follows this order:
 
-1. real backend entries at the mount root win over the synthetic root name
-2. if no real entry exists and the configured virtual directory name matches, return the synthetic root inode
-3. inside the synthetic tree, resolve the configured backend-relative path mapping
+1. real backend entries at the mount root win over a synthetic root name
+2. if no real entry exists and a configured virtual directory name matches,
+   return that synthetic root inode
+3. inside a synthetic tree, resolve the configured backend-relative path mapping
 
-This matters for collision handling. If the backend already has a real child with the same name as the synthetic directory, the real child is not hidden.
+This matters for collision handling. If the backend already has a real child
+with the same name as a synthetic directory, the real child is not hidden.
 
 ## Metadata and Ownership
 
 Synthetic nodes reuse backend metadata for the real path they represent.
 
-That means the synthetic directory and its children present ownership and mode bits that match the corresponding HopsFS objects instead of the container user.
+That means the synthetic directory and its children present ownership and mode
+bits that match the corresponding HopsFS objects instead of the container user.
 
-To avoid repeated backend stats, synthetic metadata is cached and refreshed on expiry.
+To avoid repeated backend stats, synthetic metadata is cached and refreshed on
+expiry.
 
 ## Write Boundaries
 
-The synthetic tree is read-through only for the configured paths. Mutating operations are rejected unless the target stays inside a configured synthetic subtree.
+The synthetic trees are read-through only for the configured paths. Mutating
+operations are rejected unless the target stays inside a configured synthetic
+subtree.
 
-This prevents writes from accidentally escaping the intended backend area through the virtual layout.
+This prevents writes from escaping the intended backend area through the virtual
+layout.
 
 ## Validation and Safety
 
 The mount validates configuration up front:
 
-- the virtual directory name must be a single path element
+- virtual directory names must be single path elements
 - traversal segments such as `.` and `..` are rejected
 - backend paths are normalized and deduplicated
-- the backend root must be absolute
+- backend roots must be absolute when explicitly configured
+- duplicate virtual directory names are rejected
 
 These checks prevent ambiguous or unsafe synthetic paths.
 
 ## Integration in Hopsworks
 
-The Hopsworks EE deployment no longer needs to mount a hidden `/mnt/hopsfs` path and recreate `/hopsfs` with symlinks.
+Hopsworks EE builds the `VIRTUAL_DIRECTORIES` spec from the typed settings value
+and the project-specific shared datasets. The generated spec always includes the
+project's `shared-datasets` entry first, then appends any additional configured
+virtual roots.
 
-Instead, the container mounts the filesystem directly on `/hopsfs` and passes the virtual-root configuration through to `hopsfs-mount`.
+The container no longer needs to mount a hidden `/mnt/hopsfs` path and recreate
+`/hopsfs` with symlinks. Instead, it mounts the filesystem directly on `/hopsfs`
+and passes the virtual-root configuration through to `hopsfs-mount`.
 
 ## Testing Coverage
 
 The implementation is covered by tests for:
 
 - enabled and disabled virtual-root configuration
+- multiple virtual roots at the mount root
 - invalid name and path validation
 - backend-root collision handling
 - metadata caching behavior
@@ -138,4 +149,6 @@ The implementation is covered by tests for:
 
 ## Result
 
-The filesystem now owns its visible layout directly. That makes `/hopsfs` the real mount root, keeps the shared-datasets view configurable, and avoids the symlink layer that previously broke refresh behavior.
+The filesystem now owns its visible layout directly. That makes `/hopsfs` the
+real mount root, keeps the shared-datasets view configurable, and avoids the
+symlink layer that previously broke refresh behavior.

@@ -46,6 +46,7 @@ var FallBackGroup = "root"
 var VirtualDirectoryName string = ""
 var VirtualDirectoryPathsString string = ""
 var VirtualDirectoryBackendRoot string = "/Projects"
+var VirtualDirectoriesSpec string = ""
 var UserUmask string = ""
 var Umask os.FileMode
 var StagingCacheMaxEntries int = 10240
@@ -80,6 +81,7 @@ func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	flag.StringVar(&VirtualDirectoryName, "virtualDirectoryName", "", "Optional synthetic directory name exposed at the mount root")
 	flag.StringVar(&VirtualDirectoryPathsString, "virtualDirectoryPaths", "", "Comma-separated list of paths exposed inside the synthetic directory, relative to the virtual backend root")
 	flag.StringVar(&VirtualDirectoryBackendRoot, "virtualDirectoryBackendRoot", "/Projects", "Backend root used to resolve virtual directory paths")
+	flag.StringVar(&VirtualDirectoriesSpec, "virtualDirectories", "", "Semicolon-separated virtual directory specs exposed at the mount root, for example shared-datasets:projectA/datasetA,projectB/datasetB;shared-data:/shared-data,/apps")
 	flag.BoolVar(&Version, "version", false, "Print version")
 	flag.BoolVar(&EnablePageCache, "enablePageCache", false, "Enable Linux Page Cache")
 	flag.BoolVar(&EnableDefaultPermissions, "enableDefaultPermissions", true, "Enable FUSE default_permissions option. If disabled, permissions are not checked by kernel and only checked on server side")

@@ -82,6 +82,81 @@ func TestVirtualRootMergesConfiguredPaths(t *testing.T) {
 	assert.Equal(t, syscall.ENOENT, err)
 }
 
+func TestMultipleVirtualRootsAreMergedAtRoot(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	mockClock := &MockClock{}
+	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
+	hdfsAccessor.EXPECT().IsAvailable().Return(true).AnyTimes()
+	hdfsAccessor.EXPECT().Stat("/Projects/current-project").Return(Attrs{
+		Name: "current-project",
+		Mode: os.ModeDir | 0770,
+		Uid:  111,
+		Gid:  222,
+	}, nil).AnyTimes()
+	hdfsAccessor.EXPECT().Stat("/Projects/current-project/shared-data").Return(Attrs{}, syscall.ENOENT).AnyTimes()
+	hdfsAccessor.EXPECT().Stat("/Projects/current-project/shared-datasets").Return(Attrs{}, syscall.ENOENT).AnyTimes()
+	hdfsAccessor.EXPECT().Stat("/shared-data/logs").Return(Attrs{
+		Name: "logs",
+		Mode: os.ModeDir | 0770,
+		Uid:  333,
+		Gid:  444,
+	}, nil).AnyTimes()
+	hdfsAccessor.EXPECT().Stat("/shared-data/logs/app-a").Return(Attrs{
+		Name: "app-a",
+		Mode: os.ModeDir | 0770,
+		Uid:  555,
+		Gid:  666,
+	}, nil).AnyTimes()
+
+	fs, _ := NewFileSystem(
+		[]HdfsAccessor{hdfsAccessor},
+		"/Projects/current-project",
+		[]string{"*"},
+		false,
+		DelaySyncUntilClose,
+		NewDefaultRetryPolicy(mockClock),
+		mockClock,
+		WithVirtualDirectories([]VirtualDirectoryConfig{
+			{
+				Name:        "shared-data",
+				Paths:       []string{"logs/app-a"},
+				BackendRoot: "/shared-data",
+			},
+			{
+				Name:        "shared-datasets",
+				Paths:       []string{"other-project/shared-a"},
+				BackendRoot: "/Projects",
+			},
+		}),
+	)
+	root, _ := fs.Root()
+
+	hdfsAccessor.EXPECT().ReadDir("/Projects/current-project").Return([]Attrs{
+		{Name: "dataset-a", Mode: os.ModeDir},
+		{Name: "dataset-b", Mode: os.ModeDir},
+	}, nil)
+
+	dirents, err := root.(*DirINode).ReadDirAll(nil)
+	assert.Nil(t, err)
+	assert.Equal(t, []string{"dataset-a", "dataset-b", "shared-data", "shared-datasets"}, direntNames(dirents))
+
+	sharedData, err := root.(*DirINode).Lookup(nil, "shared-data")
+	assert.Nil(t, err)
+	sharedDataDirents, err := sharedData.(*DirINode).ReadDirAll(nil)
+	assert.Nil(t, err)
+	assert.Equal(t, []string{"logs"}, direntNames(sharedDataDirents))
+
+	logs, err := sharedData.(*DirINode).Lookup(nil, "logs")
+	assert.Nil(t, err)
+	logsDirents, err := logs.(*DirINode).ReadDirAll(nil)
+	assert.Nil(t, err)
+	assert.Equal(t, []string{"app-a"}, direntNames(logsDirents))
+
+	app, err := logs.(*DirINode).Lookup(nil, "app-a")
+	assert.Nil(t, err)
+	assert.NotNil(t, app)
+}
+
 func TestVirtualRootIsDisabledWithoutConfiguration(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	mockClock := &MockClock{}

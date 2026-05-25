@@ -21,18 +21,19 @@ import (
 
 // Encapsulates state and operations for directory node on the HDFS file system
 type DirINode struct {
-	FileSystem           *FileSystem // Pointer to the owning filesystem
-	Attrs                Attrs       // Cached attributes of the directory, TODO: add TTL
-	Parent               *DirINode   // Pointer to the parent directory (allows computing fully-qualified paths on demand)
-	BackendPath          string      // Optional backend path override for virtual directories
-	VirtualStatPath      string
-	VirtualKind          VirtualDirKind
-	VirtualRelPath       string
-	VirtualRootCollision bool
-	children             map[string]fs.Node
-	negativeCache        map[string]time.Time
-	childrenMutex        sync.Mutex
-	dirMutex             sync.Mutex
+	FileSystem            *FileSystem // Pointer to the owning filesystem
+	Attrs                 Attrs       // Cached attributes of the directory, TODO: add TTL
+	Parent                *DirINode   // Pointer to the parent directory (allows computing fully-qualified paths on demand)
+	BackendPath           string      // Optional backend path override for virtual directories
+	VirtualDirectoryName  string
+	VirtualStatPath       string
+	VirtualKind           VirtualDirKind
+	VirtualRelPath        string
+	VirtualRootCollisions map[string]bool
+	children              map[string]fs.Node
+	negativeCache         map[string]time.Time
+	childrenMutex         sync.Mutex
+	dirMutex              sync.Mutex
 }
 
 type VirtualDirKind int
@@ -199,40 +200,54 @@ func (dir *DirINode) Lookup(ctx context.Context, name string) (fs.Node, error) {
 	return dir.LookupInt(Lookup, name)
 }
 
+func (dir *DirINode) virtualDirectoryConfig() (VirtualDirectoryConfig, bool) {
+	if dir.VirtualDirectoryName == "" {
+		return VirtualDirectoryConfig{}, false
+	}
+	return dir.FileSystem.virtualDirectoryConfigByName(dir.VirtualDirectoryName)
+}
+
+func (dir *DirINode) rootVirtualDirectoryCollision(name string) bool {
+	return dir.VirtualRootCollisions != nil && dir.VirtualRootCollisions[name]
+}
+
 func (dir *DirINode) LookupInt(opName string, name string) (fs.Node, error) {
-	if dir.Parent == nil && dir.FileSystem.HasVirtualDirectory() && name == dir.FileSystem.VirtualDirectoryName {
-		now := dir.FileSystem.Clock.Now()
-		if node := dir.getChildInode(opName, name); node != nil {
-			switch cached := node.(type) {
-			case *DirINode:
-				if cached.VirtualKind == VirtualDirSynthetic {
-					if !dir.VirtualRootCollision && now.Before(cached.Attrs.Expires) {
+	if dir.Parent == nil && dir.FileSystem.HasVirtualDirectory() {
+		if virtualDirectory, ok := dir.FileSystem.virtualDirectoryConfigByName(name); ok {
+			now := dir.FileSystem.Clock.Now()
+			if node := dir.getChildInode(opName, name); node != nil {
+				switch cached := node.(type) {
+				case *DirINode:
+					if cached.VirtualKind == VirtualDirSynthetic && cached.VirtualDirectoryName == virtualDirectory.Name && !dir.rootVirtualDirectoryCollision(name) && now.Before(cached.Attrs.Expires) {
 						return cached, nil
 					}
-				} else if dir.VirtualRootCollision && now.Before(cached.Attrs.Expires) {
-					return cached, nil
-				}
-			case *FileINode:
-				if now.Before(cached.Attrs.Expires) {
-					return cached, nil
+					if cached.VirtualKind == VirtualDirNone && now.Before(cached.Attrs.Expires) {
+						return cached, nil
+					}
+				case *FileINode:
+					if now.Before(cached.Attrs.Expires) {
+						return cached, nil
+					}
 				}
 			}
-		}
 
-		dir.removeChildInode(opName, name)
-		var attrs Attrs
-		node, err := dir.statInodeInHopsFS(opName, name, &attrs)
-		if err == nil {
-			return node, nil
+			if dir.rootVirtualDirectoryCollision(name) {
+				dir.removeChildInode(opName, name)
+			}
+			var attrs Attrs
+			node, err := dir.statInodeInHopsFS(opName, name, &attrs)
+			if err == nil {
+				return node, nil
+			}
+			if err != syscall.ENOENT {
+				return nil, err
+			}
+			child, childErr := dir.ensureVirtualDirectoryRootChild(opName, virtualDirectory)
+			if childErr != nil {
+				return nil, childErr
+			}
+			return child, nil
 		}
-		if err != syscall.ENOENT {
-			return nil, err
-		}
-		child, childErr := dir.ensureVirtualDirectoryRootChild(opName)
-		if childErr != nil {
-			return nil, childErr
-		}
-		return child, nil
 	}
 
 	if dir.VirtualKind == VirtualDirSynthetic {
@@ -279,7 +294,7 @@ func (dir *DirINode) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 	}
 
 	entries := make([]fuse.Dirent, 0, len(allAttrs))
-	collision := false
+	collisions := make(map[string]bool)
 	for _, a := range allAttrs {
 		if dir.FileSystem.IsPathAllowed(dir.AbsolutePathForChild(a.Name)) {
 			// Creating Dirent structure as required by FUSE
@@ -290,18 +305,23 @@ func (dir *DirINode) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 			// Speculatively pre-creating child Dir or File node with cached attributes,
 			// since it's highly likely that we will have Lookup() call for this name
 			// This is the key trick which dramatically speeds up 'ls'
-			if dir.Parent == nil && dir.FileSystem.HasVirtualDirectory() && a.Name == dir.FileSystem.VirtualDirectoryName {
-				collision = true
-				dir.removeChildInode(ReadDir, a.Name)
+			if dir.Parent == nil {
+				if virtualDirectory, ok := dir.FileSystem.virtualDirectoryConfigByName(a.Name); ok {
+					collisions[virtualDirectory.Name] = true
+					dir.removeChildInode(ReadDir, a.Name)
+				}
 			}
 			dir.addOrUpdateChildInodeAttrs(ReadDir, a.Name, a)
 		}
 	}
 
 	if dir.Parent == nil && dir.FileSystem.HasVirtualDirectory() {
-		dir.VirtualRootCollision = collision
-		if !collision {
-			child, err := dir.ensureVirtualDirectoryRootChild(ReadDir)
+		dir.VirtualRootCollisions = collisions
+		for _, virtualDirectory := range dir.FileSystem.VirtualDirectories {
+			if collisions[virtualDirectory.Name] {
+				continue
+			}
+			child, err := dir.ensureVirtualDirectoryRootChild(ReadDir, virtualDirectory)
 			if err != nil {
 				return nil, err
 			}
@@ -316,12 +336,16 @@ func (dir *DirINode) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 }
 
 func (dir *DirINode) readVirtualDirectoryEntries() ([]fuse.Dirent, error) {
-	childNames := dir.FileSystem.virtualDirectoryChildNames(dir.VirtualRelPath)
+	virtualDirectory, ok := dir.virtualDirectoryConfig()
+	if !ok {
+		return nil, fmt.Errorf("virtual directory %q is not configured", dir.VirtualDirectoryName)
+	}
+	childNames := virtualDirectory.childNames(dir.VirtualRelPath)
 	entries := make([]fuse.Dirent, 0, len(childNames))
 	now := dir.FileSystem.Clock.Now()
 	for _, childName := range childNames {
 		childRelPath := path.Join(dir.VirtualRelPath, childName)
-		if dir.FileSystem.virtualDirectoryLeafExists(childRelPath) {
+		if virtualDirectory.leafExists(childRelPath) {
 			if node := dir.getChildInode(ReadDir, childName); node != nil && nodeAttrsFresh(node, now) {
 				attrs, ok := nodeAttrs(node)
 				if !ok {
@@ -336,7 +360,7 @@ func (dir *DirINode) readVirtualDirectoryEntries() ([]fuse.Dirent, error) {
 			}
 
 			entries = append(entries, fuse.Dirent{
-				Inode: syntheticInode(path.Join("/", dir.FileSystem.VirtualDirectoryName, childRelPath)),
+				Inode: syntheticInode(path.Join("/", virtualDirectory.Name, childRelPath)),
 				Name:  childName,
 				Type:  fuse.DT_Unknown,
 			})
@@ -347,9 +371,10 @@ func (dir *DirINode) readVirtualDirectoryEntries() ([]fuse.Dirent, error) {
 			ReadDir,
 			childRelPath,
 			childName,
-			dir.FileSystem.VirtualDirectoryPath(childRelPath),
-			dir.FileSystem.VirtualDirectoryPath(childRelPath),
+			virtualDirectory.Path(childRelPath),
+			virtualDirectory.Path(childRelPath),
 			dir.Attrs,
+			virtualDirectory,
 		)
 		if err != nil {
 			return nil, err
@@ -363,29 +388,33 @@ func (dir *DirINode) readVirtualDirectoryEntries() ([]fuse.Dirent, error) {
 	return entries, nil
 }
 
-func (dir *DirINode) ensureVirtualDirectoryRootChild(operation string) (*DirINode, error) {
+func (dir *DirINode) ensureVirtualDirectoryRootChild(operation string, virtualDirectory VirtualDirectoryConfig) (*DirINode, error) {
 	child, err := dir.ensureSyntheticDirectoryChild(
 		operation,
 		"",
-		dir.FileSystem.VirtualDirectoryName,
-		dir.FileSystem.VirtualDirectoryBackendRoot,
+		virtualDirectory.Name,
+		virtualDirectory.BackendRoot,
 		dir.FileSystem.SrcDir,
 		dir.Attrs,
+		virtualDirectory,
 	)
 	if err != nil {
 		return nil, err
 	}
-	child.VirtualRootCollision = dir.VirtualRootCollision
 	return child, nil
 }
 
 func (dir *DirINode) lookupVirtualDirectoryChild(operation, name string) (fs.Node, error) {
+	virtualDirectory, ok := dir.virtualDirectoryConfig()
+	if !ok {
+		return nil, syscall.ENOENT
+	}
 	childRelPath := path.Join(dir.VirtualRelPath, name)
-	if !dir.FileSystem.virtualDirectoryRelPathExists(childRelPath) {
+	if !virtualDirectory.relPathExists(childRelPath) {
 		return nil, syscall.ENOENT
 	}
 
-	if dir.FileSystem.virtualDirectoryLeafExists(childRelPath) {
+	if virtualDirectory.leafExists(childRelPath) {
 		if node := dir.getChildInode(operation, name); node != nil && nodeAttrsFresh(node, dir.FileSystem.Clock.Now()) {
 			return node, nil
 		}
@@ -396,9 +425,10 @@ func (dir *DirINode) lookupVirtualDirectoryChild(operation, name string) (fs.Nod
 		operation,
 		childRelPath,
 		name,
-		dir.FileSystem.VirtualDirectoryPath(childRelPath),
-		dir.FileSystem.VirtualDirectoryPath(childRelPath),
+		virtualDirectory.Path(childRelPath),
+		virtualDirectory.Path(childRelPath),
 		dir.Attrs,
+		virtualDirectory,
 	)
 	if err != nil {
 		return nil, err
@@ -406,14 +436,14 @@ func (dir *DirINode) lookupVirtualDirectoryChild(operation, name string) (fs.Nod
 	return child, nil
 }
 
-func (dir *DirINode) ensureSyntheticDirectoryChild(operation string, relPath, name, backendPath, statPath string, fallback Attrs) (*DirINode, error) {
+func (dir *DirINode) ensureSyntheticDirectoryChild(operation string, relPath, name, backendPath, statPath string, fallback Attrs, virtualDirectory VirtualDirectoryConfig) (*DirINode, error) {
 	if node := dir.getChildInode(operation, name); node != nil {
-		if cachedDir, ok := node.(*DirINode); !ok || cachedDir.VirtualKind != VirtualDirSynthetic || cachedDir.VirtualStatPath != statPath || cachedDir.BackendPath != backendPath {
+		if cachedDir, ok := node.(*DirINode); !ok || cachedDir.VirtualKind != VirtualDirSynthetic || cachedDir.VirtualDirectoryName != virtualDirectory.Name || cachedDir.VirtualStatPath != statPath || cachedDir.BackendPath != backendPath || cachedDir.VirtualRelPath != relPath {
 			dir.removeChildInode(operation, name)
 		}
 	}
 
-	attrs, err := dir.syntheticDirectoryAttrs(operation, relPath, name, statPath, fallback)
+	attrs, err := dir.syntheticDirectoryAttrs(operation, relPath, name, statPath, fallback, virtualDirectory)
 	if err != nil {
 		return nil, err
 	}
@@ -424,13 +454,14 @@ func (dir *DirINode) ensureSyntheticDirectoryChild(operation string, relPath, na
 		return nil, fmt.Errorf("virtual directory path %q resolved to non-directory backend node", statPath)
 	}
 	dnode.VirtualKind = VirtualDirSynthetic
+	dnode.VirtualDirectoryName = virtualDirectory.Name
 	dnode.VirtualRelPath = relPath
 	dnode.BackendPath = backendPath
 	dnode.VirtualStatPath = statPath
 	return dnode, nil
 }
 
-func (dir *DirINode) syntheticDirectoryAttrs(operation, relPath, name, statPath string, fallback Attrs) (Attrs, error) {
+func (dir *DirINode) syntheticDirectoryAttrs(operation, relPath, name, statPath string, fallback Attrs, virtualDirectory VirtualDirectoryConfig) (Attrs, error) {
 	if node := dir.getChildInode(operation, name); node != nil {
 		if cachedDir, ok := node.(*DirINode); ok && cachedDir.VirtualKind == VirtualDirSynthetic && cachedDir.VirtualStatPath == statPath && !dir.FileSystem.Clock.Now().After(cachedDir.Attrs.Expires) {
 			return cachedDir.Attrs, nil
@@ -440,7 +471,7 @@ func (dir *DirINode) syntheticDirectoryAttrs(operation, relPath, name, statPath 
 	attrs := Attrs{
 		Name:  name,
 		Mode:  os.ModeDir | 0755,
-		Inode: syntheticInode(path.Join("/", dir.FileSystem.VirtualDirectoryName, relPath)),
+		Inode: syntheticInode(path.Join("/", virtualDirectory.Name, relPath)),
 		Uid:   fallback.Uid,
 		Gid:   fallback.Gid,
 		Mtime: dir.FileSystem.Clock.Now(),
