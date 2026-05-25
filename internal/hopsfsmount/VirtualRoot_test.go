@@ -370,6 +370,117 @@ func TestVirtualDirectoryMutationsOutsideConfiguredLeavesAreRejected(t *testing.
 	assert.Equal(t, syscall.EPERM, err)
 }
 
+func TestVirtualDirectoryRenameWithinConfiguredLeafPath(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	mockClock := &MockClock{}
+	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
+	hdfsAccessor.EXPECT().IsAvailable().Return(true).AnyTimes()
+
+	fs, _ := NewFileSystem(
+		[]HdfsAccessor{hdfsAccessor},
+		"/Projects/current-project",
+		[]string{"*"},
+		false,
+		DelaySyncUntilClose,
+		NewDefaultRetryPolicy(mockClock),
+		mockClock,
+		WithVirtualDirectory("shared-datasets", []string{"other-project/shared-a"}, "/Projects"),
+	)
+	root, _ := fs.Root()
+
+	hdfsAccessor.EXPECT().Stat("/Projects/current-project/shared-datasets").Return(Attrs{}, syscall.ENOENT)
+	hdfsAccessor.EXPECT().Stat("/Projects/current-project").Return(Attrs{
+		Name:    "current-project",
+		Mode:    os.ModeDir | 0770,
+		Uid:     111,
+		Gid:     222,
+		Expires: mockClock.Now().Add(CacheAttrsTimeDuration),
+	}, nil)
+	sharedRoot, err := root.(*DirINode).Lookup(nil, "shared-datasets")
+	assert.Nil(t, err)
+
+	hdfsAccessor.EXPECT().Stat("/Projects/other-project").Return(Attrs{
+		Name:    "other-project",
+		Mode:    os.ModeDir | 0770,
+		Uid:     333,
+		Gid:     444,
+		Expires: mockClock.Now().Add(CacheAttrsTimeDuration),
+	}, nil)
+	sharedProject, err := sharedRoot.(*DirINode).Lookup(nil, "other-project")
+	assert.Nil(t, err)
+
+	hdfsAccessor.EXPECT().Stat("/Projects/other-project/shared-a").Return(Attrs{
+		Name:    "shared-a",
+		Mode:    os.ModeDir | 0770,
+		Uid:     555,
+		Gid:     666,
+		Expires: mockClock.Now().Add(CacheAttrsTimeDuration),
+	}, nil)
+	sharedLeaf, err := sharedProject.(*DirINode).Lookup(nil, "shared-a")
+	assert.Nil(t, err)
+
+	hdfsAccessor.EXPECT().Stat("/Projects/other-project/shared-a/file1").Return(Attrs{
+		Name:    "file1",
+		Mode:    0644,
+		Uid:     777,
+		Gid:     888,
+		Expires: mockClock.Now().Add(CacheAttrsTimeDuration),
+	}, nil)
+	hdfsAccessor.EXPECT().Stat("/Projects/other-project/shared-a/file2").Return(Attrs{}, syscall.ENOENT)
+	hdfsAccessor.EXPECT().Rename2("/Projects/other-project/shared-a/file1", "/Projects/other-project/shared-a/file2", gomock.Any()).
+		Return(nil)
+
+	err = sharedLeaf.(*DirINode).Rename2(nil, &fuse.Rename2Request{
+		OldName: "file1",
+		NewName: "file2",
+	}, sharedLeaf)
+	assert.Nil(t, err)
+
+	renamed, err := sharedLeaf.(*DirINode).Lookup(nil, "file2")
+	assert.Nil(t, err)
+	assert.NotNil(t, renamed)
+}
+
+func TestVirtualRootReadDirDoesNotAbortOnMissingBranchMetadata(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	mockClock := &MockClock{}
+	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
+	hdfsAccessor.EXPECT().IsAvailable().Return(true).AnyTimes()
+
+	fs, _ := NewFileSystem(
+		[]HdfsAccessor{hdfsAccessor},
+		"/Projects/current-project",
+		[]string{"*"},
+		false,
+		DelaySyncUntilClose,
+		NewDefaultRetryPolicy(mockClock),
+		mockClock,
+		WithVirtualDirectories([]VirtualDirectoryConfig{
+			{
+				Name:        "shared-datasets",
+				Paths:       []string{"good-project/shared-a", "bad-project/shared-b"},
+				BackendRoot: "/Projects",
+			},
+		}),
+	)
+	root, _ := fs.Root()
+
+	hdfsAccessor.EXPECT().Stat("/Projects/current-project/shared-datasets").Return(Attrs{}, syscall.ENOENT)
+	hdfsAccessor.EXPECT().Stat("/Projects/current-project").Return(Attrs{
+		Name:    "current-project",
+		Mode:    os.ModeDir | 0770,
+		Uid:     111,
+		Gid:     222,
+		Expires: mockClock.Now().Add(CacheAttrsTimeDuration),
+	}, nil)
+	sharedRoot, err := root.(*DirINode).Lookup(nil, "shared-datasets")
+	assert.Nil(t, err)
+
+	dirents, err := sharedRoot.(*DirINode).ReadDirAll(nil)
+	assert.Nil(t, err)
+	assert.Equal(t, []string{"bad-project", "good-project"}, direntNames(dirents))
+}
+
 func direntNames(dirents []fuse.Dirent) []string {
 	names := make([]string, 0, len(dirents))
 	for _, dirent := range dirents {

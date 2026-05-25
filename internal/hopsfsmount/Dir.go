@@ -21,15 +21,15 @@ import (
 
 // Encapsulates state and operations for directory node on the HDFS file system
 type DirINode struct {
-	FileSystem            *FileSystem // Pointer to the owning filesystem
-	Attrs                 Attrs       // Cached attributes of the directory, TODO: add TTL
-	Parent                *DirINode   // Pointer to the parent directory (allows computing fully-qualified paths on demand)
-	BackendPath           string      // Optional backend path override for virtual directories
-	VirtualDirectoryName  string
-	VirtualStatPath       string
-	VirtualKind           VirtualDirKind
-	VirtualRelPath        string
-	VirtualRootCollisions map[string]bool
+	FileSystem            *FileSystem     // Pointer to the owning filesystem
+	Attrs                 Attrs           // Cached attributes of the directory, TODO: add TTL
+	Parent                *DirINode       // Pointer to the parent directory (allows computing fully-qualified paths on demand)
+	BackendPath           string          // Optional backend path override for synthetic directories
+	VirtualDirectoryName  string          // Name of the configured virtual directory that owns this inode
+	VirtualStatPath       string          // Backend path used when refreshing synthetic metadata
+	VirtualKind           VirtualDirKind  // Indicates whether this directory is synthetic or backed by the real tree
+	VirtualRelPath        string          // Path relative to the owning virtual directory root
+	VirtualRootCollisions map[string]bool // Root child names that collide with synthetic virtual roots
 	children              map[string]fs.Node
 	negativeCache         map[string]time.Time
 	childrenMutex         sync.Mutex
@@ -317,18 +317,25 @@ func (dir *DirINode) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 
 	if dir.Parent == nil && dir.FileSystem.HasVirtualDirectory() {
 		dir.VirtualRootCollisions = collisions
+		now := dir.FileSystem.Clock.Now()
 		for _, virtualDirectory := range dir.FileSystem.VirtualDirectories {
 			if collisions[virtualDirectory.Name] {
 				continue
 			}
-			child, err := dir.ensureVirtualDirectoryRootChild(ReadDir, virtualDirectory)
-			if err != nil {
-				return nil, err
+			if node := dir.getChildInode(ReadDir, virtualDirectory.Name); node != nil && nodeAttrsFresh(node, now) {
+				if attrs, ok := nodeAttrs(node); ok {
+					entries = append(entries, fuse.Dirent{
+						Inode: attrs.Inode,
+						Name:  attrs.Name,
+						Type:  attrs.FuseNodeType(),
+					})
+					continue
+				}
 			}
 			entries = append(entries, fuse.Dirent{
-				Inode: child.Attrs.Inode,
-				Name:  child.Attrs.Name,
-				Type:  child.Attrs.FuseNodeType(),
+				Inode: syntheticInode(path.Join("/", virtualDirectory.Name)),
+				Name:  virtualDirectory.Name,
+				Type:  fuse.DT_Unknown,
 			})
 		}
 	}
@@ -548,7 +555,10 @@ func (dir *DirINode) virtualMutationAllowed(candidatePath string) bool {
 	if dir.VirtualKind != VirtualDirSynthetic {
 		return true
 	}
-	return dir.FileSystem.virtualDirectoryMutationAllowed(candidatePath)
+	if virtualDirectory, ok := dir.virtualDirectoryConfig(); ok {
+		return virtualDirectory.mutationAllowed(candidatePath)
+	}
+	return false
 }
 
 func syntheticInode(key string) uint64 {
