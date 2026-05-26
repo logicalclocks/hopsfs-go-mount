@@ -35,10 +35,39 @@ case "$ACTION" in
     ;;
 esac
 
+if [ "$TEST_FILE" != "" ]; then
+  if [ -f "$TEST_FILE" ]; then
+    TEST_FILE_PATH="$DIR/$TEST_FILE"
+  elif [ -f "$DIR/$TEST_FILE" ]; then
+    TEST_FILE_PATH="$DIR/$TEST_FILE"
+  else
+    echo "TEST_FILE '$TEST_FILE' does not exist."
+    exit 1
+  fi
+
+  case "$TEST_FILE_PATH" in
+    "$DIR"/*)
+      TEST_PACKAGE="./$(dirname "${TEST_FILE_PATH#$DIR/}")"
+      ;;
+    *)
+      echo "TEST_FILE '$TEST_FILE_PATH' must be inside the repository root."
+      exit 1
+      ;;
+  esac
+
+  TEST=$(grep -E '^func Test' "$TEST_FILE_PATH" | sed -E 's/^func (Test[[:alnum:]_]+).*/\1/' | awk 'BEGIN { first = 1 } { if (!first) printf("|"); printf "%s", $0; first = 0 }')
+  if [ "$TEST" = "" ]; then
+    echo "No Go tests found in '$TEST_FILE_PATH'."
+    exit 1
+  fi
+fi
+
 USERID=`id -u`
 GROUPID=`id -g`
 DOCKER_USER=${DOCKER_USER:-hopsfs}
-HADOOP_USER_NAME=${HADOOP_USER_NAME:-hdfs}
+TEST=${TEST:-}
+TEST_PACKAGE=${TEST_PACKAGE:-}
+TEST_FILE=${TEST_FILE:-}
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "Make sure that you have docker installed to build or test this project."
@@ -59,6 +88,12 @@ docker build --progress=plain --platform="$PLATFORM" --build-arg userid="$USERID
 
 echo "Running ${ACTION} using ${DOCKER_IMAGE} on ${PLATFORM}"
 DOCKER_RUN_ARGS=(--rm -v "$DIR:/src" -w /src --user "$DOCKER_USER")
+if [ "$TEST" != "" ]; then
+  DOCKER_RUN_ARGS+=(-e "TEST=$TEST")
+fi
+if [ "$TEST_PACKAGE" != "" ]; then
+  DOCKER_RUN_ARGS+=(-e "TEST_PACKAGE=$TEST_PACKAGE")
+fi
 if [ "$NAMENODE_ADDRESS" != "" ]; then
   DOCKER_RUN_ARGS+=(-e "NAMENODE_ADDRESS=$NAMENODE_ADDRESS")
 fi

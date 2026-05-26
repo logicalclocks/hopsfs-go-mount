@@ -109,6 +109,12 @@ To point the integration tests at a different HDFS namenode, set
 NAMENODE_ADDRESS=10.0.0.42:8020 make test-docker
 ```
 
+To run only the tests declared in a single file, set `TEST_FILE`:
+
+```bash
+TEST_FILE=internal/hopsfsmount/VirtualRoot_test.go make test-docker
+```
+
 To run the Docker tests against a Kubernetes cluster, use the helper script
 that pulls the namenode address from `namenode-external` and the PEM material
 from `namenode-hopsfs-crypto-material`:
