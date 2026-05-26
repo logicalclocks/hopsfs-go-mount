@@ -50,6 +50,7 @@ func TestVirtualRootMergesConfiguredPaths(t *testing.T) {
 		{Name: "dataset-a", Mode: os.ModeDir},
 		{Name: "dataset-b", Mode: os.ModeDir},
 	}, nil)
+	hdfsAccessor.EXPECT().Stat("/Projects/current-project/virtual-share").Return(Attrs{}, syscall.ENOENT)
 
 	dirents, err := root.(*DirINode).ReadDirAll(nil)
 	assert.Nil(t, err)
@@ -364,8 +365,6 @@ func TestVirtualDirectoryMutationsOutsideConfiguredLeavesAreRejected(t *testing.
 	_, err = sharedRoot.(*DirINode).Mkdir(nil, &fuse.MkdirRequest{
 		Name: "other-project",
 		Mode: os.ModeDir | 0755,
-		Uid:  0,
-		Gid:  0,
 	})
 	assert.Equal(t, syscall.EPERM, err)
 }
@@ -476,6 +475,14 @@ func TestVirtualRootReadDirDoesNotAbortOnMissingBranchMetadata(t *testing.T) {
 	sharedRoot, err := root.(*DirINode).Lookup(nil, "shared-datasets")
 	assert.Nil(t, err)
 
+	hdfsAccessor.EXPECT().Stat("/Projects/good-project").Return(Attrs{
+		Name:    "good-project",
+		Mode:    os.ModeDir | 0770,
+		Uid:     333,
+		Gid:     444,
+		Expires: mockClock.Now().Add(CacheAttrsTimeDuration),
+	}, nil)
+	hdfsAccessor.EXPECT().Stat("/Projects/bad-project").Return(Attrs{}, syscall.EACCES)
 	dirents, err := sharedRoot.(*DirINode).ReadDirAll(nil)
 	assert.Nil(t, err)
 	assert.Equal(t, []string{"bad-project", "good-project"}, direntNames(dirents))

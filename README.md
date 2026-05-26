@@ -83,3 +83,39 @@ Options:
         Print version
 ```
 
+Testing
+-------
+
+Run the test suite locally with:
+
+```bash
+make test
+```
+
+Run the test suite inside Docker with:
+
+```bash
+make test-docker
+```
+
+If `KUBECONFIG` is set, `make test-docker` automatically uses the Kubernetes
+cluster helper to fetch the namenode address and TLS material from the cluster.
+To force the local Docker-only path, set `TEST_DOCKER_MODE=local`.
+
+To point the integration tests at a different HDFS namenode, set
+`NAMENODE_ADDRESS` before running `make test-docker`, for example:
+
+```bash
+NAMENODE_ADDRESS=10.0.0.42:8020 make test-docker
+```
+
+To run the Docker tests against a Kubernetes cluster, use the helper script
+that pulls the namenode address from `namenode-external` and the PEM material
+from `namenode-hopsfs-crypto-material`:
+
+```bash
+KUBECONFIG=/Users/gibson/Work/terraform/kubeconfig-gibson ./scripts/test-docker-from-k8s.sh
+```
+
+The Docker path mounts FUSE filesystems, so it needs a Linux-capable Docker
+host with access to `/dev/fuse`.

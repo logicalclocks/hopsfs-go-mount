@@ -384,7 +384,12 @@ func (dir *DirINode) readVirtualDirectoryEntries() ([]fuse.Dirent, error) {
 			virtualDirectory,
 		)
 		if err != nil {
-			return nil, err
+			entries = append(entries, fuse.Dirent{
+				Inode: syntheticInode(path.Join("/", virtualDirectory.Name, childRelPath)),
+				Name:  childName,
+				Type:  fuse.DT_Unknown,
+			})
+			continue
 		}
 		entries = append(entries, fuse.Dirent{
 			Inode: child.Attrs.Inode,

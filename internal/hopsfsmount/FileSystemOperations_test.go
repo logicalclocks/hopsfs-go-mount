@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -721,10 +722,9 @@ func TestSeekSmallFile(t *testing.T) {
 }
 
 func seekTest(t *testing.T, dataSize int, diskSeekTestFile string, dfsSeekTestFile string) {
-	addresses := make([]string, 1)
-	addresses[0] = "127.0.0.1:8020"
+	addresses := testNameNodeAddresses()
 
-	user, err := ugcache.CurrentUserName()
+	user, err := testConnectionUserName()
 	if err != nil {
 		t.Fatalf("couldn't determine user: %s", err)
 	}
@@ -981,6 +981,49 @@ func TestMultipleMountPoints(t *testing.T) {
 	})
 }
 
+func testNameNodeAddress() string {
+	if address := strings.TrimSpace(os.Getenv("NAMENODE_ADDRESS")); address != "" {
+		return address
+	}
+
+	return "127.0.0.1:8020"
+}
+
+func testConnectionUserName() (string, error) {
+	if userName := strings.TrimSpace(os.Getenv("HADOOP_USER_NAME")); userName != "" {
+		return userName, nil
+	}
+
+	return ugcache.CurrentUserName()
+}
+
+func testTLSEnabled() (bool, error) {
+	rawValue := strings.TrimSpace(os.Getenv("HOPSFS_TEST_TLS"))
+	if rawValue == "" {
+		return false, nil
+	}
+
+	enabled, err := strconv.ParseBool(rawValue)
+	if err != nil {
+		return false, fmt.Errorf("invalid HOPSFS_TEST_TLS value %q: %w", rawValue, err)
+	}
+
+	return enabled, nil
+}
+
+func testNameNodeAddresses() []string {
+	rawAddresses := testNameNodeAddress()
+	addresses := strings.Split(rawAddresses, ",")
+	filtered := make([]string, 0, len(addresses))
+	for _, address := range addresses {
+		if trimmed := strings.TrimSpace(address); trimmed != "" {
+			filtered = append(filtered, trimmed)
+		}
+	}
+
+	return filtered
+}
+
 func withMount(t testing.TB, srcDir string, delaySyncUntilClose bool, fn func(mntPath string, hdfsAccessor HdfsAccessor)) {
 	t.Helper()
 
@@ -1003,8 +1046,12 @@ func withMount(t testing.TB, srcDir string, delaySyncUntilClose bool, fn func(mn
 	if err := InitConnectionUser(); err != nil {
 		t.Fatalf("Error/InitConnectionUser: %v", err)
 	}
-	hdfsAccessor, _ := NewHdfsAccessor("127.0.0.1:8020", WallClock{}, TLSConfig{TLS: false, RootCABundle: RootCABundle, ClientCertificate: ClientCertificate, ClientKey: ClientKey})
-	err := hdfsAccessor.EnsureConnected()
+	tlsEnabled, err := testTLSEnabled()
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	hdfsAccessor, _ := NewHdfsAccessor(testNameNodeAddress(), WallClock{}, TLSConfig{TLS: tlsEnabled, RootCABundle: RootCABundle, ClientCertificate: ClientCertificate, ClientKey: ClientKey})
+	err = hdfsAccessor.EnsureConnected()
 	if err != nil {
 		t.Fatalf(fmt.Sprintf("Error/NewHdfsAccessor: %v ", err), nil)
 	}

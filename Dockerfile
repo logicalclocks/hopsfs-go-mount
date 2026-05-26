@@ -7,9 +7,9 @@ ARG userid=1000
 ARG groupid=1000
 ARG user=hopsfs
 
-# Install required packages (including gcc, hostname, tar, gzip, and git)
+# Install required packages (including gcc, hostname, tar, gzip, git, and fuse3)
 RUN yum -y update && \
-    yum install -y wget git make gcc hostname tar gzip && \
+    yum install -y wget git make gcc hostname tar gzip fuse3 nc && \
     yum clean all
 
 RUN  cd /tmp; \
@@ -21,8 +21,8 @@ ls -al; \
 rm -rf /usr/local/go; \
 tar -C /usr/local -xzf go1.26.1.linux-amd64.tar.gz 
 
-RUN groupadd hopsfs --gid ${groupid}; \
-useradd -ms /bin/bash hopsfs --uid ${userid} --gid ${groupid};
+RUN groupadd ${user} --gid ${groupid}; \
+useradd -ms /bin/bash ${user} --uid ${userid} --gid ${groupid};
 
 
 RUN mkdir /src; \
@@ -30,11 +30,12 @@ chmod 777 /src
 
 ENV PATH=$PATH:/usr/local/go/bin
 ENV GOPATH=/go
+ENV PATH=$PATH:/go/bin
 RUN mkdir /go; \
     chmod 777 /go
 
-USER hopsfs
+USER ${user}
 RUN echo $PATH && \
     echo $GOPATH && \
     go install github.com/golang/mock/mockgen@v1.6.0 && \
-    echo "export PATH=$PATH:/go/bin" >> /home/hopsfs/.bashrc
+    echo "export PATH=$PATH:/go/bin" >> /home/${user}/.bashrc

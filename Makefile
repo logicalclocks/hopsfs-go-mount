@@ -9,6 +9,12 @@ HOSTNAME=`hostname`
 VERSION=$(shell grep "VERSION" internal/hopsfsmount/Version.go | awk '{ print $$3 }' | tr -d \")
 TEST?=Test
 TEST_PACKAGE?=./...
+DOCKER_IMAGE_PREFIX?=
+DOCKER_PLATFORM?=linux/amd64
+TEST_DOCKER_MODE?=auto
+TEST_DOCKER_USER?=hdfs
+
+.PHONY: all hopsfs-mount clean mock test test-docker
 
 all: hopsfs-mount 
 
@@ -32,3 +38,10 @@ mock: hopsfs-mount \
 test: mock
 	go clean -testcache
 	go test -v -p 1 -timeout 20m -run $(TEST) -coverprofile coverage.txt `go list $(TEST_PACKAGE) | grep -v cmd`
+
+test-docker:
+	@if [ "$(TEST_DOCKER_MODE)" = "k8s" ] || { [ "$(TEST_DOCKER_MODE)" = "auto" ] && [ -n "$(KUBECONFIG)" ]; }; then \
+	  ./scripts/test-docker-from-k8s.sh; \
+	else \
+	  DOCKER_USER="$${DOCKER_USER:-$(TEST_DOCKER_USER)}" NAMENODE_ADDRESS="$(NAMENODE_ADDRESS)" HOPSFS_TEST_TLS="$(HOPSFS_TEST_TLS)" HOPSFS_TEST_CERT_DIR="$(HOPSFS_TEST_CERT_DIR)" ./docker-build.sh "$(DOCKER_IMAGE_PREFIX)" "$(DOCKER_PLATFORM)" test; \
+	fi
