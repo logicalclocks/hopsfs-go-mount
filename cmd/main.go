@@ -253,23 +253,39 @@ func normalizeVirtualDirectorySpecPath(rawPath string) (string, error) {
 
 func parseVirtualDirectoriesJSON(raw string) ([]hopsfsmount.VirtualDirectoryConfig, error) {
 	var configs []hopsfsmount.VirtualDirectoryConfig
-	if err := json.Unmarshal([]byte(raw), &configs); err != nil {
-		var payload struct {
-			VirtualDirectories []hopsfsmount.VirtualDirectoryConfig `json:"virtualDirectories"`
+	if err := json.Unmarshal([]byte(raw), &configs); err == nil {
+		if len(configs) == 0 {
+			return nil, fmt.Errorf("virtual directory JSON array must not be empty")
 		}
-		if err2 := json.Unmarshal([]byte(raw), &payload); err2 != nil {
-			var single hopsfsmount.VirtualDirectoryConfig
-			if err3 := json.Unmarshal([]byte(raw), &single); err3 != nil {
-				return nil, err
-			}
-			if single.Name == "" {
-				return nil, fmt.Errorf("virtual directory config must include a non-empty name")
-			}
-			return []hopsfsmount.VirtualDirectoryConfig{single}, nil
-		}
-		return payload.VirtualDirectories, nil
+		return configs, nil
 	}
-	return configs, nil
+
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &payload); err == nil {
+		if rawVirtualDirectories, ok := payload["virtualDirectories"]; ok {
+			if err := json.Unmarshal(rawVirtualDirectories, &configs); err != nil {
+				return nil, fmt.Errorf("invalid virtualDirectories field: %w", err)
+			}
+			if len(configs) == 0 {
+				return nil, fmt.Errorf("virtualDirectories must contain at least one entry")
+			}
+			return configs, nil
+		}
+
+		var single hopsfsmount.VirtualDirectoryConfig
+		if err := json.Unmarshal([]byte(raw), &single); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(single.Name) == "" {
+			return nil, fmt.Errorf("virtual directory config must include a non-empty name")
+		}
+		if len(single.Paths) == 0 {
+			return nil, fmt.Errorf("virtual directory config %q must include at least one backend directory", single.Name)
+		}
+		return []hopsfsmount.VirtualDirectoryConfig{single}, nil
+	}
+
+	return nil, fmt.Errorf("invalid virtual directory JSON config")
 }
 
 func createStagingDir() {

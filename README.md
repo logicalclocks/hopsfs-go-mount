@@ -120,5 +120,8 @@ The Kubernetes helper pulls the namenode address from `namenode-external` and
 the PEM material from `namenode-hopsfs-crypto-material`:
 
 ```bash
-KUBECONFIG=/Users/gibson/Work/terraform/kubeconfig-gibson make test-kubernetes
+KUBECONFIG=/path/to/kubeconfig make test-kubernetes
 ```
+
+Set `KUBECONFIG` to the kubeconfig file for your cluster before running the
+command.
