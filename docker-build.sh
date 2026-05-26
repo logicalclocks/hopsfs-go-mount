@@ -6,6 +6,7 @@
 set -e
 
 DIR=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
+TEST_SELECTION_SCRIPT="$DIR/scripts/test-selection.sh"
 
 if [ "$1" == "-h" ] || [ "$1" == "--help" ]; then
     echo "Usage."
@@ -35,36 +36,21 @@ case "$ACTION" in
     ;;
 esac
 
+if [ -f "$TEST_SELECTION_SCRIPT" ]; then
+  . "$TEST_SELECTION_SCRIPT"
+fi
+
 if [ "$TEST_FILE" != "" ]; then
-  if [ -f "$TEST_FILE" ]; then
-    TEST_FILE_PATH="$DIR/$TEST_FILE"
-  elif [ -f "$DIR/$TEST_FILE" ]; then
-    TEST_FILE_PATH="$DIR/$TEST_FILE"
-  else
-    echo "TEST_FILE '$TEST_FILE' does not exist."
-    exit 1
-  fi
-
-  case "$TEST_FILE_PATH" in
-    "$DIR"/*)
-      TEST_PACKAGE="./$(dirname "${TEST_FILE_PATH#$DIR/}")"
-      ;;
-    *)
-      echo "TEST_FILE '$TEST_FILE_PATH' must be inside the repository root."
-      exit 1
-      ;;
-  esac
-
-  TEST=$(grep -E '^func Test' "$TEST_FILE_PATH" | sed -E 's/^func (Test[[:alnum:]_]+).*/\1/' | awk 'BEGIN { first = 1 } { if (!first) printf("|"); printf "%s", $0; first = 0 }')
-  if [ "$TEST" = "" ]; then
-    echo "No Go tests found in '$TEST_FILE_PATH'."
-    exit 1
-  fi
+  TEST_SELECTION=$(resolve_test_selection "$DIR" "$TEST_FILE" "$TEST" "$TEST_PACKAGE") || exit 1
+  TEST_FILE_PATH=$(printf '%s\n' "$TEST_SELECTION" | sed -n '1p')
+  TEST_PACKAGE=$(printf '%s\n' "$TEST_SELECTION" | sed -n '2p')
+  TEST=$(printf '%s\n' "$TEST_SELECTION" | sed -n '3p')
 fi
 
 USERID=`id -u`
 GROUPID=`id -g`
 DOCKER_USER=${DOCKER_USER:-hopsfs}
+HADOOP_USER_NAME=${HADOOP_USER_NAME:-$DOCKER_USER}
 TEST=${TEST:-}
 TEST_PACKAGE=${TEST_PACKAGE:-}
 TEST_FILE=${TEST_FILE:-}
@@ -100,6 +86,10 @@ fi
 if [ "$HOPSFS_TEST_TLS" != "" ]; then
   DOCKER_RUN_ARGS+=(-e "HOPSFS_TEST_TLS=$HOPSFS_TEST_TLS")
 fi
+if [ "$HOPSFS_TEST_LOG_LEVEL" != "" ]; then
+  DOCKER_RUN_ARGS+=(-e "HOPSFS_TEST_LOG_LEVEL=$HOPSFS_TEST_LOG_LEVEL")
+fi
+DOCKER_RUN_ARGS+=(-e "HADOOP_USER_NAME=$HADOOP_USER_NAME")
 if [ "$HOPSFS_TEST_CERT_DIR" != "" ]; then
   DOCKER_RUN_ARGS+=(-v "$HOPSFS_TEST_CERT_DIR:/srv/hops/super_crypto/hdfs:ro")
 fi

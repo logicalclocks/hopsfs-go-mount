@@ -92,36 +92,33 @@ Run the test suite locally with:
 make test
 ```
 
-Run the test suite inside Docker with:
+Run the test suite inside Kubernetes with:
 
 ```bash
-make test-docker
+make test-kubernetes
 ```
 
-If `KUBECONFIG` is set, `make test-docker` automatically uses the Kubernetes
-cluster helper to fetch the namenode address and TLS material from the cluster.
-To force the local Docker-only path, set `TEST_DOCKER_MODE=local`.
+`make test-kubernetes` builds and pushes
+`dockerlocal:5000/hopsfs_mount:3.4.3.1-EE-SANPSHOT`, then starts a pod that
+pulls `registry.service.consul:30443/hopsfs_mount:3.4.3.1-EE-SANPSHOT` and
+runs the tests inside the cluster using the mounted HopsFS certificates.
 
 To point the integration tests at a different HDFS namenode, set
-`NAMENODE_ADDRESS` before running `make test-docker`, for example:
+`NAMENODE_ADDRESS` before running `make test-kubernetes`, for example:
 
 ```bash
-NAMENODE_ADDRESS=10.0.0.42:8020 make test-docker
+NAMENODE_ADDRESS=10.0.0.42:8020 make test-kubernetes
 ```
 
 To run only the tests declared in a single file, set `TEST_FILE`:
 
 ```bash
-TEST_FILE=internal/hopsfsmount/VirtualRoot_test.go make test-docker
+TEST_FILE=internal/hopsfsmount/VirtualRoot_test.go make test-kubernetes
 ```
 
-To run the Docker tests against a Kubernetes cluster, use the helper script
-that pulls the namenode address from `namenode-external` and the PEM material
-from `namenode-hopsfs-crypto-material`:
+The Kubernetes helper pulls the namenode address from `namenode-external` and
+the PEM material from `namenode-hopsfs-crypto-material`:
 
 ```bash
-KUBECONFIG=/Users/gibson/Work/terraform/kubeconfig-gibson ./scripts/test-docker-from-k8s.sh
+KUBECONFIG=/Users/gibson/Work/terraform/kubeconfig-gibson make test-kubernetes
 ```
-
-The Docker path mounts FUSE filesystems, so it needs a Linux-capable Docker
-host with access to `/dev/fuse`.
