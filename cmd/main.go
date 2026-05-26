@@ -146,20 +146,7 @@ func splitCSV(raw string) []string {
 }
 
 func buildVirtualDirectories() ([]hopsfsmount.VirtualDirectoryConfig, error) {
-	if strings.TrimSpace(hopsfsmount.VirtualDirectoriesSpec) != "" {
-		return parseVirtualDirectoriesSpec(hopsfsmount.VirtualDirectoriesSpec)
-	}
-
-	sharedVirtualPaths := splitCSV(hopsfsmount.VirtualDirectoryPathsString)
-	if hopsfsmount.VirtualDirectoryName != "" && len(sharedVirtualPaths) > 0 {
-		return []hopsfsmount.VirtualDirectoryConfig{{
-			Name:        hopsfsmount.VirtualDirectoryName,
-			Paths:       sharedVirtualPaths,
-			BackendRoot: hopsfsmount.VirtualDirectoryBackendRoot,
-		}}, nil
-	}
-
-	return nil, nil
+	return parseVirtualDirectoriesSpec(hopsfsmount.VirtualDirectoriesSpec)
 }
 
 func parseVirtualDirectoriesSpec(raw string) ([]hopsfsmount.VirtualDirectoryConfig, error) {

@@ -42,7 +42,7 @@ import (
 type FileINode struct {
 	FileSystem *FileSystem // pointer to the FieSystem which owns this file
 	Attrs      Attrs       // Cache of file attributes // TODO: implement TTL
-	Parent     *DirINode   // Pointer to the parent directory (allows computing fully-qualified paths on demand)
+	Parent     Pather      // Pointer to the parent directory (allows computing fully-qualified paths on demand)
 
 	activeHandles    []*FileHandle // list of opened file handles
 	fileMutex        sync.Mutex    // mutex for file metadata (Attrs)
@@ -91,7 +91,7 @@ func (file *FileINode) Attr(ctx context.Context, a *fuse.Attr) error {
 
 	// No local proxy - use cache or fetch from backend
 	if file.FileSystem.Clock.Now().After(file.Attrs.Expires) {
-		_, err := file.Parent.statInodeInHopsFS(GetattrFile, file.Attrs.Name, &file.Attrs)
+		_, err := parentStatInodeInHopsFS(file.Parent, GetattrFile, file.Attrs.Name, &file.Attrs)
 		if err != nil {
 			return err
 		}

@@ -46,23 +46,21 @@ dr-xr-xr-x 1 yarnapp hadoop 0 May 22 10:27 hopsworks-tools <virtual-dir>
 
 ## Configuration Model
 
-The mount accepts three pieces of virtual-root configuration:
+The mount accepts one virtual-root configuration string. Hopsworks passes it as `HOPSFS_MOUNT_VIRTUAL_DIRECTORIES`, and the mount parses it as a semicolon-separated list of entries in the form:
 
-- `virtualDirectoryName`: the synthetic directory name shown at the mount root
-- `virtualDirectoryPaths`: the backend-relative paths to expose under that directory
-- `virtualDirectoryBackendRoot`: the backend root used to resolve those relative paths
-
-The feature is optional. If the virtual directory is not configured, the mount behaves like a normal single-root HopsFS mount.
+```text
+<virtual-directory-name>:<backend-dirs>[;<virtual-directory-name>:<backend-dirs>...]
+```
 
 Example:
 
 ```text
-virtualDirectoryName = shared-datasets
-virtualDirectoryBackendRoot = /Projects
-virtualDirectoryPaths = projectA/shared-datasets, projectB/shared-datasets
+shared-datasets:projectA/shared-datasets,projectB/shared-datasets;shared-data:/shared-data,/apps
 ```
 
-In that example, `/hopsfs/shared-datasets` becomes a synthetic directory that contains the configured project subtrees.
+Each entry creates one synthetic top-level directory under `/hopsfs`. If the virtual directory list is empty, the mount behaves like a normal single-root HopsFS mount.
+
+In the example above, `/hopsfs/shared-datasets` and `/hopsfs/shared-data` become virtual directories that expose the configured backend subtrees.
 
 ## Directory Layout
 

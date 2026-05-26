@@ -58,28 +58,28 @@ func TestVirtualRootMergesConfiguredPaths(t *testing.T) {
 
 	sharedRoot, err := root.(*DirINode).Lookup(nil, "virtual-share")
 	assert.Nil(t, err)
-	assert.Equal(t, uint32(111), sharedRoot.(*DirINode).Attrs.Uid)
-	assert.Equal(t, uint32(222), sharedRoot.(*DirINode).Attrs.Gid)
+	assert.Equal(t, uint32(111), sharedRoot.(*VirtualDirINode).Attrs.Uid)
+	assert.Equal(t, uint32(222), sharedRoot.(*VirtualDirINode).Attrs.Gid)
 
-	sharedDirents, err := sharedRoot.(*DirINode).ReadDirAll(nil)
+	sharedDirents, err := sharedRoot.(*VirtualDirINode).ReadDirAll(nil)
 	assert.Nil(t, err)
 	assert.Equal(t, []string{"another-project", "other-project"}, direntNames(sharedDirents))
 
-	sharedProject, err := sharedRoot.(*DirINode).Lookup(nil, "other-project")
+	sharedProject, err := sharedRoot.(*VirtualDirINode).Lookup(nil, "other-project")
 	assert.Nil(t, err)
-	assert.Equal(t, uint32(555), sharedProject.(*DirINode).Attrs.Uid)
-	assert.Equal(t, uint32(666), sharedProject.(*DirINode).Attrs.Gid)
+	assert.Equal(t, uint32(555), sharedProject.(*VirtualDirINode).Attrs.Uid)
+	assert.Equal(t, uint32(666), sharedProject.(*VirtualDirINode).Attrs.Gid)
 
 	hdfsAccessor.EXPECT().Stat("/Projects/other-project/shared-a").Return(Attrs{Name: "shared-a", Mode: os.ModeDir}, nil).AnyTimes()
-	sharedDataset, err := sharedProject.(*DirINode).Lookup(nil, "shared-a")
+	sharedDataset, err := sharedProject.(*VirtualDirINode).Lookup(nil, "shared-a")
 	assert.Nil(t, err)
 	assert.NotNil(t, sharedDataset)
 
-	projectDirents, err := sharedProject.(*DirINode).ReadDirAll(nil)
+	projectDirents, err := sharedProject.(*VirtualDirINode).ReadDirAll(nil)
 	assert.Nil(t, err)
 	assert.Equal(t, []string{"shared-a", "shared-b"}, direntNames(projectDirents))
 
-	_, err = sharedProject.(*DirINode).Lookup(nil, "not-shared")
+	_, err = sharedProject.(*VirtualDirINode).Lookup(nil, "not-shared")
 	assert.Equal(t, syscall.ENOENT, err)
 }
 
@@ -143,17 +143,17 @@ func TestMultipleVirtualRootsAreMergedAtRoot(t *testing.T) {
 
 	sharedData, err := root.(*DirINode).Lookup(nil, "shared-data")
 	assert.Nil(t, err)
-	sharedDataDirents, err := sharedData.(*DirINode).ReadDirAll(nil)
+	sharedDataDirents, err := sharedData.(*VirtualDirINode).ReadDirAll(nil)
 	assert.Nil(t, err)
 	assert.Equal(t, []string{"logs"}, direntNames(sharedDataDirents))
 
-	logs, err := sharedData.(*DirINode).Lookup(nil, "logs")
+	logs, err := sharedData.(*VirtualDirINode).Lookup(nil, "logs")
 	assert.Nil(t, err)
-	logsDirents, err := logs.(*DirINode).ReadDirAll(nil)
+	logsDirents, err := logs.(*VirtualDirINode).ReadDirAll(nil)
 	assert.Nil(t, err)
 	assert.Equal(t, []string{"app-a"}, direntNames(logsDirents))
 
-	app, err := logs.(*DirINode).Lookup(nil, "app-a")
+	app, err := logs.(*VirtualDirINode).Lookup(nil, "app-a")
 	assert.Nil(t, err)
 	assert.NotNil(t, app)
 }
@@ -252,7 +252,7 @@ func TestVirtualRootCollisionPrefersBackendEntry(t *testing.T) {
 	}, nil)
 	synthetic, err := root.(*DirINode).Lookup(nil, "shared-datasets")
 	assert.Nil(t, err)
-	assert.Equal(t, VirtualDirSynthetic, synthetic.(*DirINode).VirtualKind)
+	assert.IsType(t, &VirtualDirINode{}, synthetic)
 
 	hdfsAccessor.EXPECT().ReadDir("/Projects/current-project").Return([]Attrs{
 		{
@@ -320,15 +320,15 @@ func TestVirtualDirectoryMetadataIsCached(t *testing.T) {
 		Gid:     444,
 		Expires: mockClock.Now().Add(CacheAttrsTimeDuration),
 	}, nil)
-	sharedProject, err := first.(*DirINode).Lookup(nil, "other-project")
+	sharedProject, err := first.(*VirtualDirINode).Lookup(nil, "other-project")
 	assert.Nil(t, err)
-	dirents, err := first.(*DirINode).ReadDirAll(nil)
+	dirents, err := first.(*VirtualDirINode).ReadDirAll(nil)
 	assert.Nil(t, err)
 	assert.Equal(t, []string{"other-project"}, direntNames(dirents))
-	direntsAgain, err := first.(*DirINode).ReadDirAll(nil)
+	direntsAgain, err := first.(*VirtualDirINode).ReadDirAll(nil)
 	assert.Nil(t, err)
 	assert.Equal(t, []string{"other-project"}, direntNames(direntsAgain))
-	sharedProjectAgain, err := first.(*DirINode).Lookup(nil, "other-project")
+	sharedProjectAgain, err := first.(*VirtualDirINode).Lookup(nil, "other-project")
 	assert.Nil(t, err)
 	assert.Equal(t, sharedProject, sharedProjectAgain)
 }
@@ -362,7 +362,7 @@ func TestVirtualDirectoryMutationsOutsideConfiguredLeavesAreRejected(t *testing.
 	sharedRoot, err := root.(*DirINode).Lookup(nil, "shared-datasets")
 	assert.Nil(t, err)
 
-	_, err = sharedRoot.(*DirINode).Mkdir(nil, &fuse.MkdirRequest{
+	_, err = sharedRoot.(*VirtualDirINode).Mkdir(nil, &fuse.MkdirRequest{
 		Name: "other-project",
 		Mode: os.ModeDir | 0755,
 	})
@@ -405,7 +405,7 @@ func TestVirtualDirectoryRenameWithinConfiguredLeafPath(t *testing.T) {
 		Gid:     444,
 		Expires: mockClock.Now().Add(CacheAttrsTimeDuration),
 	}, nil)
-	sharedProject, err := sharedRoot.(*DirINode).Lookup(nil, "other-project")
+	sharedProject, err := sharedRoot.(*VirtualDirINode).Lookup(nil, "other-project")
 	assert.Nil(t, err)
 
 	hdfsAccessor.EXPECT().Stat("/Projects/other-project/shared-a").Return(Attrs{
@@ -415,7 +415,7 @@ func TestVirtualDirectoryRenameWithinConfiguredLeafPath(t *testing.T) {
 		Gid:     666,
 		Expires: mockClock.Now().Add(CacheAttrsTimeDuration),
 	}, nil)
-	sharedLeaf, err := sharedProject.(*DirINode).Lookup(nil, "shared-a")
+	sharedLeaf, err := sharedProject.(*VirtualDirINode).Lookup(nil, "shared-a")
 	assert.Nil(t, err)
 
 	hdfsAccessor.EXPECT().Stat("/Projects/other-project/shared-a/file1").Return(Attrs{
@@ -483,7 +483,7 @@ func TestVirtualRootReadDirDoesNotAbortOnMissingBranchMetadata(t *testing.T) {
 		Expires: mockClock.Now().Add(CacheAttrsTimeDuration),
 	}, nil)
 	hdfsAccessor.EXPECT().Stat("/Projects/bad-project").Return(Attrs{}, syscall.EACCES)
-	dirents, err := sharedRoot.(*DirINode).ReadDirAll(nil)
+	dirents, err := sharedRoot.(*VirtualDirINode).ReadDirAll(nil)
 	assert.Nil(t, err)
 	assert.Equal(t, []string{"bad-project", "good-project"}, direntNames(dirents))
 }

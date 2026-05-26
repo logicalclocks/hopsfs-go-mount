@@ -43,9 +43,6 @@ var EnableDefaultPermissions = true
 var CacheAttrsTimeSecs = 5
 var FallBackUser = "root"
 var FallBackGroup = "root"
-var VirtualDirectoryName string = ""
-var VirtualDirectoryPathsString string = ""
-var VirtualDirectoryBackendRoot string = "/Projects"
 var VirtualDirectoriesSpec string = ""
 var UserUmask string = ""
 var Umask os.FileMode
@@ -78,9 +75,6 @@ func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	flag.StringVar(&ForceOverrideGroupname, "hopsFSGroupName", "", "HopsFS groupname")
 	flag.BoolVar(&UseGroupFromHopsFsDatasetPath, "getGroupFromHopsFSDatasetPath", false, "Get the group from hopsfs dataset path. This will work if a hopsworks project is mounted")
 	flag.BoolVar(&AllowOther, "allowOther", true, "Allow other users to use the filesystem")
-	flag.StringVar(&VirtualDirectoryName, "virtualDirectoryName", "", "Optional synthetic directory name exposed at the mount root")
-	flag.StringVar(&VirtualDirectoryPathsString, "virtualDirectoryPaths", "", "Comma-separated list of paths exposed inside the synthetic directory, relative to the virtual backend root")
-	flag.StringVar(&VirtualDirectoryBackendRoot, "virtualDirectoryBackendRoot", "/Projects", "Backend root used to resolve virtual directory paths")
 	flag.StringVar(&VirtualDirectoriesSpec, "virtualDirectories", "", "Semicolon-separated virtual directory specs exposed at the mount root, for example shared-datasets:projectA/datasetA,projectB/datasetB;shared-data:/shared-data,/apps")
 	flag.BoolVar(&Version, "version", false, "Print version")
 	flag.BoolVar(&EnablePageCache, "enablePageCache", false, "Enable Linux Page Cache")

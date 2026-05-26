@@ -25,23 +25,22 @@ import (
 )
 
 type FileSystem struct {
-	HdfsAccessors               []HdfsAccessor // Interface to access HDFS
-	hdfsAccessorsIndex          int
-	SrcDir                      string   // Src directory that will mounted
-	AllowedPrefixes             []string // List of allowed path prefixes (only those prefixes are exposed via mountpoint)
-	VirtualDirectories          []VirtualDirectoryConfig
-	VirtualDirectoryName        string   // Legacy single-root compatibility input
-	VirtualDirectoryPaths       []string // Legacy single-root compatibility input
-	VirtualDirectoryBackendRoot string   // Legacy single-root compatibility input
-	ReadOnly                    bool     // Indicates whether mount filesystem with readonly
-	DelaySyncUntilClose         bool     // If true, ignore sync/flush operations until file close
-	Mounted                     bool     // True if filesystem is mounted
-	RetryPolicy                 *RetryPolicy
-	Clock                       Clock  // interface to get wall clock time
-	FsInfo                      FsInfo // Usage of HDFS, including capacity, remaining, used sizes.
+	HdfsAccessors       []HdfsAccessor // Interface to access HDFS
+	hdfsAccessorsIndex  int
+	SrcDir              string   // Src directory that will mounted
+	AllowedPrefixes     []string // List of allowed path prefixes (only those prefixes are exposed via mountpoint)
+	VirtualDirectories  []VirtualDirectoryConfig
+	ReadOnly            bool // Indicates whether mount filesystem with readonly
+	DelaySyncUntilClose bool // If true, ignore sync/flush operations until file close
+	Mounted             bool // True if filesystem is mounted
+	RetryPolicy         *RetryPolicy
+	Clock               Clock  // interface to get wall clock time
+	FsInfo              FsInfo // Usage of HDFS, including capacity, remaining, used sizes.
 
-	closeOnUnmount     []io.Closer // list of opened files (zip archives) to be closed on unmount
-	closeOnUnmountLock sync.Mutex  // mutex to protet closeOnUnmount
+	closeOnUnmount            []io.Closer // list of opened files (zip archives) to be closed on unmount
+	closeOnUnmountLock        sync.Mutex  // mutex to protet closeOnUnmount
+	virtualRootCollisions     map[string]bool
+	virtualRootCollisionsLock sync.RWMutex
 }
 
 type VirtualDirectoryConfig struct {
@@ -73,15 +72,14 @@ func WithVirtualDirectory(name string, paths []string, backendRoot string) FileS
 // Creates an instance of mountable file system
 func NewFileSystem(hdfsAccessors []HdfsAccessor, srcDir string, allowedPrefixes []string, readOnly bool, delaySyncUntilClose bool, retryPolicy *RetryPolicy, clock Clock, opts ...FileSystemOption) (*FileSystem, error) {
 	filesystem := &FileSystem{
-		HdfsAccessors:               hdfsAccessors,
-		Mounted:                     false,
-		AllowedPrefixes:             allowedPrefixes,
-		VirtualDirectoryBackendRoot: "/Projects",
-		ReadOnly:                    readOnly,
-		DelaySyncUntilClose:         delaySyncUntilClose,
-		RetryPolicy:                 retryPolicy,
-		Clock:                       clock,
-		SrcDir:                      srcDir}
+		HdfsAccessors:       hdfsAccessors,
+		Mounted:             false,
+		AllowedPrefixes:     allowedPrefixes,
+		ReadOnly:            readOnly,
+		DelaySyncUntilClose: delaySyncUntilClose,
+		RetryPolicy:         retryPolicy,
+		Clock:               clock,
+		SrcDir:              srcDir}
 	for _, opt := range opts {
 		if opt == nil {
 			continue
@@ -259,6 +257,33 @@ func (filesystem *FileSystem) HasVirtualDirectories() bool {
 	return filesystem.HasVirtualDirectory()
 }
 
+func (filesystem *FileSystem) setVirtualRootCollisions(collisions map[string]bool) {
+	filesystem.virtualRootCollisionsLock.Lock()
+	defer filesystem.virtualRootCollisionsLock.Unlock()
+
+	if len(collisions) == 0 {
+		filesystem.virtualRootCollisions = nil
+		return
+	}
+
+	filesystem.virtualRootCollisions = make(map[string]bool, len(collisions))
+	for name, collided := range collisions {
+		if collided {
+			filesystem.virtualRootCollisions[name] = true
+		}
+	}
+}
+
+func (filesystem *FileSystem) virtualRootCollision(name string) bool {
+	filesystem.virtualRootCollisionsLock.RLock()
+	defer filesystem.virtualRootCollisionsLock.RUnlock()
+
+	if filesystem.virtualRootCollisions == nil {
+		return false
+	}
+	return filesystem.virtualRootCollisions[name]
+}
+
 func (filesystem *FileSystem) firstVirtualDirectoryConfig() (VirtualDirectoryConfig, bool) {
 	if len(filesystem.VirtualDirectories) == 0 {
 		return VirtualDirectoryConfig{}, false
@@ -276,32 +301,11 @@ func (filesystem *FileSystem) virtualDirectoryConfigByName(name string) (Virtual
 }
 
 func (filesystem *FileSystem) normalizeVirtualDirectoryConfig() error {
-	if len(filesystem.VirtualDirectories) == 0 && (filesystem.VirtualDirectoryName != "" || len(filesystem.VirtualDirectoryPaths) > 0) {
-		filesystem.VirtualDirectories = []VirtualDirectoryConfig{{
-			Name:        filesystem.VirtualDirectoryName,
-			Paths:       append([]string(nil), filesystem.VirtualDirectoryPaths...),
-			BackendRoot: filesystem.VirtualDirectoryBackendRoot,
-		}}
-	}
-
 	normalized, err := normalizeVirtualDirectoryConfigs(filesystem.VirtualDirectories)
 	if err != nil {
 		return err
 	}
 	filesystem.VirtualDirectories = normalized
-
-	if len(filesystem.VirtualDirectories) > 0 {
-		first := filesystem.VirtualDirectories[0]
-		filesystem.VirtualDirectoryName = first.Name
-		filesystem.VirtualDirectoryPaths = append([]string(nil), first.Paths...)
-		filesystem.VirtualDirectoryBackendRoot = first.BackendRoot
-	} else {
-		filesystem.VirtualDirectoryName = ""
-		filesystem.VirtualDirectoryPaths = nil
-		if strings.TrimSpace(filesystem.VirtualDirectoryBackendRoot) == "" {
-			filesystem.VirtualDirectoryBackendRoot = "/Projects"
-		}
-	}
 	return nil
 }
 
@@ -344,15 +348,11 @@ func (filesystem *FileSystem) VirtualDirectoryPath(relPath string) string {
 	if virtualDirectory, ok := filesystem.firstVirtualDirectoryConfig(); ok {
 		return virtualDirectory.Path(relPath)
 	}
-	backendRoot, err := normalizeVirtualDirectoryBackendRoot(filesystem.VirtualDirectoryBackendRoot)
-	if err != nil {
-		return "/Projects"
-	}
 	relPath = strings.Trim(relPath, "/")
 	if relPath == "" {
-		return path.Clean(backendRoot)
+		return "/"
 	}
-	return path.Join(backendRoot, relPath)
+	return path.Join("/", relPath)
 }
 
 func (filesystem *FileSystem) VirtualDirectoryRootPath() string {
