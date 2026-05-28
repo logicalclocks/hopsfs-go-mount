@@ -219,6 +219,18 @@ func TestVirtualDirectoryConfigValidation(t *testing.T) {
 		DelaySyncUntilClose,
 		NewDefaultRetryPolicy(mockClock),
 		mockClock,
+		WithVirtualDirectory("shared-datasets", []string{"other-project/shared-a"}, ""),
+	)
+	assert.Error(t, err)
+
+	_, err = NewFileSystem(
+		nil,
+		"/Projects/current-project",
+		[]string{"*"},
+		false,
+		DelaySyncUntilClose,
+		NewDefaultRetryPolicy(mockClock),
+		mockClock,
 		WithVirtualDirectory("shared-datasets", []string{"other-project/shared-a"}, "Projects"),
 	)
 	assert.Error(t, err)

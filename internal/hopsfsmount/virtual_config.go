@@ -93,7 +93,7 @@ func normalizeVirtualDirectoryPath(rawPath string) (string, error) {
 func normalizeVirtualDirectoryBackendRoot(rawPath string) (string, error) {
 	rawPath = strings.TrimSpace(rawPath)
 	if rawPath == "" {
-		return "/Projects", nil
+		return "", fmt.Errorf("invalid virtual directory backend root: must be specified and absolute")
 	}
 	if rawPath == "/" {
 		return "/", nil

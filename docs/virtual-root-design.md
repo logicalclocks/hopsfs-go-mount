@@ -49,13 +49,13 @@ dr-xr-xr-x 1 yarnapp hadoop 0 May 22 10:27 hopsworks-tools <virtual-dir>
 The mount accepts one virtual-root configuration string. Hopsworks passes it as `HOPSFS_MOUNT_VIRTUAL_DIRECTORIES`, and the mount parses it as a semicolon-separated list of entries in the form:
 
 ```text
-<virtual-directory-name>:<backend-dirs>[;<virtual-directory-name>:<backend-dirs>...]
+<virtual-directory-name>:<backend-root>:<backend-dirs>[;<virtual-directory-name>:<backend-root>:<backend-dirs>...]
 ```
 
 Example:
 
 ```text
-shared-datasets:projectA/shared-datasets,projectB/shared-datasets;shared-data:/shared-data,/apps
+shared-datasets:/Projects:projectA/shared-datasets,projectB/shared-datasets;shared-data:/Projects:shared-data,apps
 ```
 
 Each entry creates one synthetic top-level directory under `/hopsfs`. If the virtual directory list is empty, the mount behaves like a normal single-root HopsFS mount.
@@ -113,7 +113,7 @@ The mount validates configuration up front:
 - the virtual directory name must be a single path element
 - traversal segments such as `.` and `..` are rejected
 - backend paths are normalized and deduplicated
-- the backend root must be absolute
+- the backend root must be specified and absolute
 
 These checks prevent ambiguous or unsafe synthetic paths.
 

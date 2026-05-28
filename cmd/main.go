@@ -175,31 +175,28 @@ func parseVirtualDirectoriesSpec(raw string) ([]hopsfsmount.VirtualDirectoryConf
 }
 
 func parseVirtualDirectorySpecEntry(entry string) (hopsfsmount.VirtualDirectoryConfig, error) {
-	parts := strings.SplitN(entry, ":", 2)
-	if len(parts) != 2 {
-		return hopsfsmount.VirtualDirectoryConfig{}, fmt.Errorf("invalid virtual directory spec %q: expected <name>:<backend-dirs>", entry)
+	parts := strings.SplitN(entry, ":", 3)
+	if len(parts) != 3 {
+		return hopsfsmount.VirtualDirectoryConfig{}, fmt.Errorf("invalid virtual directory spec %q: expected <name>:<backend-root>:<backend-dirs>", entry)
 	}
 	name := strings.TrimSpace(parts[0])
 	if name == "" {
 		return hopsfsmount.VirtualDirectoryConfig{}, fmt.Errorf("invalid virtual directory spec %q: virtual directory name is required", entry)
 	}
-	rawDirs := splitCSV(parts[1])
+	backendRoot, err := normalizeVirtualDirectorySpecBackendRoot(parts[1])
+	if err != nil {
+		return hopsfsmount.VirtualDirectoryConfig{}, fmt.Errorf("invalid virtual directory spec %q: %w", entry, err)
+	}
+	rawDirs := splitCSV(parts[2])
 	if len(rawDirs) == 0 {
 		return hopsfsmount.VirtualDirectoryConfig{}, fmt.Errorf("invalid virtual directory spec %q: at least one backend directory is required", entry)
 	}
 
-	hasAbsolute := false
-	hasRelative := false
 	normalizedPaths := make([]string, 0, len(rawDirs))
 	for _, rawDir := range rawDirs {
 		rawDir = strings.TrimSpace(rawDir)
 		if rawDir == "" {
 			continue
-		}
-		if strings.HasPrefix(rawDir, "/") {
-			hasAbsolute = true
-		} else {
-			hasRelative = true
 		}
 		normalized, err := normalizeVirtualDirectorySpecPath(rawDir)
 		if err != nil {
@@ -212,14 +209,6 @@ func parseVirtualDirectorySpecEntry(entry string) (hopsfsmount.VirtualDirectoryC
 	}
 	if len(normalizedPaths) == 0 {
 		return hopsfsmount.VirtualDirectoryConfig{}, fmt.Errorf("invalid virtual directory spec %q: at least one backend directory is required", entry)
-	}
-	if hasAbsolute && hasRelative {
-		return hopsfsmount.VirtualDirectoryConfig{}, fmt.Errorf("invalid virtual directory spec %q: do not mix absolute and relative backend directories", entry)
-	}
-
-	backendRoot := "/Projects"
-	if hasAbsolute {
-		backendRoot = "/"
 	}
 	return hopsfsmount.VirtualDirectoryConfig{
 		Name:        name,
@@ -251,11 +240,33 @@ func normalizeVirtualDirectorySpecPath(rawPath string) (string, error) {
 	return strings.Join(normalizedParts, "/"), nil
 }
 
+func normalizeVirtualDirectorySpecBackendRoot(rawPath string) (string, error) {
+	rawPath = strings.TrimSpace(rawPath)
+	if rawPath == "" {
+		return "", fmt.Errorf("invalid virtual directory backend root: must be specified and absolute")
+	}
+	if rawPath == "/" {
+		return "/", nil
+	}
+	if !strings.HasPrefix(rawPath, "/") {
+		return "", fmt.Errorf("invalid virtual directory backend root %q: must be an absolute path", rawPath)
+	}
+
+	normalized, err := normalizeVirtualDirectorySpecPath(rawPath)
+	if err != nil {
+		return "", fmt.Errorf("invalid virtual directory backend root %q: %w", rawPath, err)
+	}
+	return "/" + normalized, nil
+}
+
 func parseVirtualDirectoriesJSON(raw string) ([]hopsfsmount.VirtualDirectoryConfig, error) {
 	var configs []hopsfsmount.VirtualDirectoryConfig
 	if err := json.Unmarshal([]byte(raw), &configs); err == nil {
 		if len(configs) == 0 {
 			return nil, fmt.Errorf("virtual directory JSON array must not be empty")
+		}
+		if err := validateVirtualDirectoryJSONConfigs(configs); err != nil {
+			return nil, err
 		}
 		return configs, nil
 	}
@@ -268,6 +279,9 @@ func parseVirtualDirectoriesJSON(raw string) ([]hopsfsmount.VirtualDirectoryConf
 			}
 			if len(configs) == 0 {
 				return nil, fmt.Errorf("virtualDirectories must contain at least one entry")
+			}
+			if err := validateVirtualDirectoryJSONConfigs(configs); err != nil {
+				return nil, err
 			}
 			return configs, nil
 		}
@@ -282,10 +296,35 @@ func parseVirtualDirectoriesJSON(raw string) ([]hopsfsmount.VirtualDirectoryConf
 		if len(single.Paths) == 0 {
 			return nil, fmt.Errorf("virtual directory config %q must include at least one backend directory", single.Name)
 		}
+		if err := validateVirtualDirectoryJSONConfig(single); err != nil {
+			return nil, err
+		}
 		return []hopsfsmount.VirtualDirectoryConfig{single}, nil
 	}
 
 	return nil, fmt.Errorf("invalid virtual directory JSON config")
+}
+
+func validateVirtualDirectoryJSONConfigs(configs []hopsfsmount.VirtualDirectoryConfig) error {
+	for _, config := range configs {
+		if err := validateVirtualDirectoryJSONConfig(config); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateVirtualDirectoryJSONConfig(config hopsfsmount.VirtualDirectoryConfig) error {
+	if strings.TrimSpace(config.Name) == "" {
+		return fmt.Errorf("virtual directory config must include a non-empty name")
+	}
+	if len(config.Paths) == 0 {
+		return fmt.Errorf("virtual directory config %q must include at least one backend directory", config.Name)
+	}
+	if _, err := normalizeVirtualDirectorySpecBackendRoot(config.BackendRoot); err != nil {
+		return fmt.Errorf("invalid virtual directory config %q: %w", config.Name, err)
+	}
+	return nil
 }
 
 func createStagingDir() {
