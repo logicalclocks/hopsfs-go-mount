@@ -6,7 +6,6 @@ package hopsfsmount
 import (
 	"fmt"
 	"github.com/colinmarc/hdfs/v2"
-	"hash/fnv"
 	"os"
 	"path"
 	"sync"
@@ -19,29 +18,16 @@ import (
 	"hopsworks.ai/hopsfsmount/internal/hopsfsmount/logger"
 )
 
-// Encapsulates state and operations for directory node on the HDFS file system
+// DirINode represents a real backend-backed directory node.
 type DirINode struct {
-	FileSystem            *FileSystem          // Pointer to the owning filesystem
-	Attrs                 Attrs                // Cached attributes of the directory, TODO: add TTL
-	Parent                Pather               // Pointer to the parent directory (allows computing fully-qualified paths on demand)
-	BackendPath           string               // Optional backend path override for synthetic directories
-	VirtualDirectoryName  string               // Name of the configured virtual directory that owns this inode
-	VirtualStatPath       string               // Backend path used when refreshing synthetic metadata
-	VirtualKind           VirtualDirKind       // Indicates whether this directory is synthetic or backed by the real tree
-	VirtualRelPath        string               // Path relative to the owning virtual directory root
-	VirtualRootCollisions map[string]bool      // Root child names that collide with synthetic virtual roots
-	children              map[string]fs.Node   // Cached directory entries
-	negativeCache         map[string]time.Time // Caches "not found" results: name -> expiry time
-	childrenMutex         sync.Mutex           // for concurrent read and updates
-	dirMutex              sync.Mutex           // One read or write operation on a directory at a time
+	FileSystem    *FileSystem        // Pointer to the owning filesystem
+	Attrs         Attrs              // Cached attributes of the directory, TODO: add TTL
+	Parent        Pather             // Pointer to the parent directory (allows computing fully-qualified paths on demand)
+	children      map[string]fs.Node // Cached directory entries
+	negativeCache map[string]time.Time
+	childrenMutex sync.Mutex
+	dirMutex      sync.Mutex
 }
-
-type VirtualDirKind int
-
-const (
-	VirtualDirNone VirtualDirKind = iota
-	VirtualDirSynthetic
-)
 
 // Verify that *Dir implements necesary FUSE interfaces
 var _ fs.Node = (*DirINode)(nil)
@@ -59,14 +45,10 @@ var _ fs.NodeFsyncer = (*DirINode)(nil)
 
 // Returns absolute path of the dir in HDFS namespace
 func (dir *DirINode) AbsolutePath() string {
-	if dir.BackendPath != "" {
-		return dir.BackendPath
-	}
 	if dir.Parent == nil {
 		return dir.FileSystem.SrcDir
-	} else {
-		return path.Join(dir.Parent.AbsolutePath(), dir.Attrs.Name)
 	}
+	return path.Join(dir.Parent.AbsolutePath(), dir.Attrs.Name)
 }
 
 // Returns absolute path of the child item of this directory
@@ -79,19 +61,7 @@ func (dir *DirINode) Attr(ctx context.Context, a *fuse.Attr) error {
 	dir.lockMutex()
 	defer dir.unlockMutex()
 
-	if dir.VirtualKind == VirtualDirSynthetic {
-		if dir.FileSystem.Clock.Now().After(dir.Attrs.Expires) {
-			if err := dir.refreshSyntheticAttrs(); err != nil {
-				return err
-			}
-		} else {
-			logger.Info("Stat successful. Returning from Cache ", logger.Fields{Operation: GetattrDir, Path: path.Join(dir.AbsolutePath()), FileSize: dir.Attrs.Size,
-				IsDir: dir.Attrs.Mode.IsDir(), IsRegular: dir.Attrs.Mode.IsRegular()})
-		}
-		return dir.Attrs.ConvertAttrToFuse(a)
-	}
-
-	if dir.VirtualKind == VirtualDirNone && dir.Parent != nil && dir.FileSystem.Clock.Now().After(dir.Attrs.Expires) {
+	if dir.Parent != nil && dir.FileSystem.Clock.Now().After(dir.Attrs.Expires) {
 		_, err := parentStatInodeInHopsFS(dir.Parent, GetattrDir, dir.Attrs.Name, &dir.Attrs)
 		if err != nil {
 			return err
@@ -207,10 +177,6 @@ func (dir *DirINode) LookupInt(opName string, name string) (fs.Node, error) {
 		}
 	}
 
-	if dir.VirtualKind == VirtualDirSynthetic {
-		return dir.lookupVirtualDirectoryChild(opName, name)
-	}
-
 	if !dir.FileSystem.IsPathAllowed(dir.AbsolutePathForChild(name)) {
 		return nil, syscall.ENOENT
 	}
@@ -271,232 +237,6 @@ func (dir *DirINode) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 	return entries, nil
 }
 
-func (dir *DirINode) virtualDirectoryConfig() (VirtualDirectoryConfig, bool) {
-	if dir.VirtualDirectoryName == "" {
-		return VirtualDirectoryConfig{}, false
-	}
-	return dir.FileSystem.virtualDirectoryConfigByName(dir.VirtualDirectoryName)
-}
-
-func (dir *DirINode) rootVirtualDirectoryCollision(name string) bool {
-	return dir.VirtualRootCollisions != nil && dir.VirtualRootCollisions[name]
-}
-
-func (dir *DirINode) readVirtualDirectoryEntries() ([]fuse.Dirent, error) {
-	virtualDirectory, ok := dir.virtualDirectoryConfig()
-	if !ok {
-		return nil, fmt.Errorf("virtual directory %q is not configured", dir.VirtualDirectoryName)
-	}
-	childNames := virtualDirectory.childNames(dir.VirtualRelPath)
-	entries := make([]fuse.Dirent, 0, len(childNames))
-	now := dir.FileSystem.Clock.Now()
-	for _, childName := range childNames {
-		childRelPath := path.Join(dir.VirtualRelPath, childName)
-		if virtualDirectory.leafExists(childRelPath) {
-			if node := dir.getChildInode(ReadDir, childName); node != nil && nodeAttrsFresh(node, now) {
-				attrs, ok := nodeAttrs(node)
-				if !ok {
-					return nil, fmt.Errorf("unexpected cached node type for %s", childName)
-				}
-				entries = append(entries, fuse.Dirent{
-					Inode: attrs.Inode,
-					Name:  childName,
-					Type:  attrs.FuseNodeType(),
-				})
-				continue
-			}
-
-			entries = append(entries, fuse.Dirent{
-				Inode: syntheticInode(path.Join("/", virtualDirectory.Name, childRelPath)),
-				Name:  childName,
-				Type:  fuse.DT_Unknown,
-			})
-			continue
-		}
-
-		child, err := dir.ensureSyntheticDirectoryChild(
-			ReadDir,
-			childRelPath,
-			childName,
-			virtualDirectory.Path(childRelPath),
-			virtualDirectory.Path(childRelPath),
-			dir.Attrs,
-			virtualDirectory,
-		)
-		if err != nil {
-			entries = append(entries, fuse.Dirent{
-				Inode: syntheticInode(path.Join("/", virtualDirectory.Name, childRelPath)),
-				Name:  childName,
-				Type:  fuse.DT_Unknown,
-			})
-			continue
-		}
-		entries = append(entries, fuse.Dirent{
-			Inode: child.Attrs.Inode,
-			Name:  childName,
-			Type:  fuse.DT_Dir,
-		})
-	}
-	return entries, nil
-}
-
-func (dir *DirINode) ensureVirtualDirectoryRootChild(operation string, virtualDirectory VirtualDirectoryConfig) (*DirINode, error) {
-	child, err := dir.ensureSyntheticDirectoryChild(
-		operation,
-		"",
-		virtualDirectory.Name,
-		virtualDirectory.BackendRoot,
-		dir.FileSystem.SrcDir,
-		dir.Attrs,
-		virtualDirectory,
-	)
-	if err != nil {
-		return nil, err
-	}
-	return child, nil
-}
-
-func (dir *DirINode) lookupVirtualDirectoryChild(operation, name string) (fs.Node, error) {
-	virtualDirectory, ok := dir.virtualDirectoryConfig()
-	if !ok {
-		return nil, syscall.ENOENT
-	}
-	childRelPath := path.Join(dir.VirtualRelPath, name)
-	if !virtualDirectory.relPathExists(childRelPath) {
-		return nil, syscall.ENOENT
-	}
-
-	if virtualDirectory.leafExists(childRelPath) {
-		if node := dir.getChildInode(operation, name); node != nil && nodeAttrsFresh(node, dir.FileSystem.Clock.Now()) {
-			return node, nil
-		}
-		return dir.statInodeInHopsFS(operation, name, &Attrs{})
-	}
-
-	child, err := dir.ensureSyntheticDirectoryChild(
-		operation,
-		childRelPath,
-		name,
-		virtualDirectory.Path(childRelPath),
-		virtualDirectory.Path(childRelPath),
-		dir.Attrs,
-		virtualDirectory,
-	)
-	if err != nil {
-		return nil, err
-	}
-	return child, nil
-}
-
-func (dir *DirINode) ensureSyntheticDirectoryChild(operation string, relPath, name, backendPath, statPath string, fallback Attrs, virtualDirectory VirtualDirectoryConfig) (*DirINode, error) {
-	if node := dir.getChildInode(operation, name); node != nil {
-		if cachedDir, ok := node.(*DirINode); !ok || cachedDir.VirtualKind != VirtualDirSynthetic || cachedDir.VirtualDirectoryName != virtualDirectory.Name || cachedDir.VirtualStatPath != statPath || cachedDir.BackendPath != backendPath || cachedDir.VirtualRelPath != relPath {
-			dir.removeChildInode(operation, name)
-		}
-	}
-
-	attrs, err := dir.syntheticDirectoryAttrs(operation, relPath, name, statPath, fallback, virtualDirectory)
-	if err != nil {
-		return nil, err
-	}
-
-	node := dir.addOrUpdateChildInodeAttrs(operation, name, attrs)
-	dnode, ok := node.(*DirINode)
-	if !ok {
-		return nil, fmt.Errorf("virtual directory path %q resolved to non-directory backend node", statPath)
-	}
-	dnode.VirtualKind = VirtualDirSynthetic
-	dnode.VirtualDirectoryName = virtualDirectory.Name
-	dnode.VirtualRelPath = relPath
-	dnode.BackendPath = backendPath
-	dnode.VirtualStatPath = statPath
-	return dnode, nil
-}
-
-func (dir *DirINode) syntheticDirectoryAttrs(operation, relPath, name, statPath string, fallback Attrs, virtualDirectory VirtualDirectoryConfig) (Attrs, error) {
-	if node := dir.getChildInode(operation, name); node != nil {
-		if cachedDir, ok := node.(*DirINode); ok && cachedDir.VirtualKind == VirtualDirSynthetic && cachedDir.VirtualStatPath == statPath && !dir.FileSystem.Clock.Now().After(cachedDir.Attrs.Expires) {
-			return cachedDir.Attrs, nil
-		}
-	}
-
-	attrs := Attrs{
-		Name:  name,
-		Mode:  os.ModeDir | 0755,
-		Inode: syntheticInode(path.Join("/", virtualDirectory.Name, relPath)),
-		Uid:   fallback.Uid,
-		Gid:   fallback.Gid,
-		Mtime: dir.FileSystem.Clock.Now(),
-		Ctime: dir.FileSystem.Clock.Now(),
-	}
-
-	if statPath != "" {
-		backendAttrs, err := dir.FileSystem.getDFSConnector().Stat(statPath)
-		if err != nil {
-			return Attrs{}, err
-		}
-		if !backendAttrs.Mode.IsDir() {
-			return Attrs{}, fmt.Errorf("%s: virtual directory path %q is not a directory", operation, statPath)
-		}
-		attrs.Mode = backendAttrs.Mode
-		attrs.Uid = backendAttrs.Uid
-		attrs.Gid = backendAttrs.Gid
-		attrs.DFSUserName = backendAttrs.DFSUserName
-		attrs.DFSGroupName = backendAttrs.DFSGroupName
-		attrs.Mtime = backendAttrs.Mtime
-		attrs.Ctime = backendAttrs.Ctime
-		attrs.Size = backendAttrs.Size
-		attrs.Expires = backendAttrs.Expires
-	}
-
-	if attrs.Expires.IsZero() {
-		attrs.Expires = dir.FileSystem.Clock.Now().Add(CacheAttrsTimeDuration)
-	}
-
-	return attrs, nil
-}
-
-func (dir *DirINode) refreshSyntheticAttrs() error {
-	if dir.VirtualStatPath == "" {
-		return nil
-	}
-
-	backendAttrs, err := dir.FileSystem.getDFSConnector().Stat(dir.VirtualStatPath)
-	if err != nil {
-		return err
-	}
-	if !backendAttrs.Mode.IsDir() {
-		return fmt.Errorf("virtual directory path %q is not a directory", dir.VirtualStatPath)
-	}
-	backendAttrs.Name = dir.Attrs.Name
-	backendAttrs.Inode = dir.Attrs.Inode
-	if backendAttrs.Expires.IsZero() {
-		backendAttrs.Expires = dir.FileSystem.Clock.Now().Add(CacheAttrsTimeDuration)
-	}
-	dir.Attrs = backendAttrs
-	return nil
-}
-
-func (dir *DirINode) virtualMutationAllowed(candidatePath string) bool {
-	if dir.VirtualKind != VirtualDirSynthetic {
-		return true
-	}
-	if virtualDirectory, ok := dir.virtualDirectoryConfig(); ok {
-		return virtualDirectory.mutationAllowed(candidatePath)
-	}
-	return false
-}
-
-func syntheticInode(key string) uint64 {
-	hasher := fnv.New64a()
-	_, _ = hasher.Write([]byte(key))
-	inode := hasher.Sum64()
-	if inode == 0 {
-		return 1
-	}
-	return inode
-}
-
 // Performs Stat() query on the backend
 func (dir *DirINode) statInodeInHopsFS(operation, name string, attrs *Attrs) (fs.Node, error) {
 
@@ -523,10 +263,6 @@ func (dir *DirINode) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node
 	defer dir.unlockMutex()
 
 	targetPath := dir.AbsolutePathForChild(req.Name)
-	if !dir.virtualMutationAllowed(targetPath) {
-		logger.Warn("Rejected mkdir outside configured virtual tree", logger.Fields{Operation: Mkdir, Path: targetPath})
-		return nil, syscall.EPERM
-	}
 
 	// check user and group information first.
 	userName, err := getUserName(req.Uid)
@@ -571,10 +307,6 @@ func (dir *DirINode) Create(ctx context.Context, req *fuse.CreateRequest, resp *
 
 	req.Mode = ComputePermissions(req.Mode)
 	targetPath := dir.AbsolutePathForChild(req.Name)
-	if !dir.virtualMutationAllowed(targetPath) {
-		logger.Warn("Rejected create outside configured virtual tree", logger.Fields{Operation: Create, Path: targetPath})
-		return nil, nil, syscall.EPERM
-	}
 	logger.Info("Creating a new file", logger.Fields{Operation: Create, Path: targetPath, Mode: req.Mode, Flags: req.Flags})
 
 	// first determine the usename and grup name for the new file
@@ -635,10 +367,6 @@ func (dir *DirINode) Remove(ctx context.Context, req *fuse.RemoveRequest) error 
 	defer dir.unlockMutex()
 
 	targetPath := dir.AbsolutePathForChild(req.Name)
-	if !dir.virtualMutationAllowed(targetPath) {
-		logger.Warn("Rejected remove outside configured virtual tree", logger.Fields{Operation: Remove, Path: targetPath})
-		return syscall.EPERM
-	}
 
 	logger.Debug("Removing path", logger.Fields{Operation: Remove, Path: targetPath})
 	err := dir.FileSystem.getDFSConnector().Remove(targetPath)
@@ -667,11 +395,6 @@ func (srcParent *DirINode) renameInt(operationName, oldName, newName string, dst
 	oldPath := srcParent.AbsolutePathForChild(oldName)
 	newPath := dstParentDir.(*DirINode).AbsolutePathForChild(newName)
 	logger.Debug("Renaming", logger.Fields{Operation: operationName, From: oldPath, To: newPath})
-
-	if !srcParent.virtualMutationAllowed(oldPath) || !dstParentDir.(*DirINode).virtualMutationAllowed(newPath) {
-		logger.Warn("Rejected rename outside configured virtual tree", logger.Fields{Operation: operationName, From: oldPath, To: newPath})
-		return syscall.EPERM
-	}
 
 	srcInode, err := srcParent.LookupInt(Rename, oldName)
 	if err != nil {
@@ -755,10 +478,6 @@ func (dir *DirINode) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp
 	defer dir.unlockMutex()
 
 	path := dir.AbsolutePath()
-	if !dir.virtualMutationAllowed(path) {
-		logger.Warn("Rejected setattr outside configured virtual tree", logger.Fields{Operation: Chmod, Path: path})
-		return syscall.EPERM
-	}
 
 	if req.Valid.Size() {
 		logger.Error(fmt.Sprintf("Unsupported operation. Can not set size of a directory"), logger.Fields{Operation: Chmod, Path: path})

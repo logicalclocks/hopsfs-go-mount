@@ -139,14 +139,14 @@ func (filesystem *FileSystem) Root() (fs.Node, error) {
 	uid64, _ := strconv.ParseUint(cu.Uid, 10, 32)
 	gid64, _ := strconv.ParseUint(cu.Gid, 10, 32)
 
-	return &DirINode{FileSystem: filesystem, Parent: nil, Attrs: Attrs{
+	return newDirINode(filesystem, nil, Attrs{
 		Inode: 1,
 		Uid:   uint32(uid64),
 		Gid:   uint32(gid64),
 		Mode:  0755 | os.ModeDir,
 		Mtime: filesystem.Clock.Now(),
-		Ctime: filesystem.Clock.Now()},
-	}, nil
+		Ctime: filesystem.Clock.Now(),
+	}), nil
 }
 
 // Returns if given absoute path allowed by any of the prefixes

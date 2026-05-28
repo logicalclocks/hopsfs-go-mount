@@ -276,7 +276,6 @@ func TestVirtualRootCollisionPrefersBackendEntry(t *testing.T) {
 	node, err := root.(*DirINode).Lookup(nil, "shared-datasets")
 	assert.Nil(t, err)
 	collision := node.(*DirINode)
-	assert.Equal(t, VirtualDirNone, collision.VirtualKind)
 	assert.Equal(t, uint32(333), collision.Attrs.Uid)
 	assert.Equal(t, uint32(444), collision.Attrs.Gid)
 }

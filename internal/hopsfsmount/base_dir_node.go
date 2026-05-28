@@ -4,6 +4,7 @@
 package hopsfsmount
 
 import (
+	"hash/fnv"
 	"os"
 	"path"
 	"sync"
@@ -40,6 +41,10 @@ type baseDirNode struct {
 	negativeCache map[string]time.Time
 	childrenMutex sync.Mutex
 	dirMutex      sync.Mutex
+}
+
+func newDirINode(fileSystem *FileSystem, parent Pather, attrs Attrs) *DirINode {
+	return &DirINode{FileSystem: fileSystem, Parent: parent, Attrs: attrs}
 }
 
 // Returns absolute path of the dir in HDFS namespace.
@@ -90,7 +95,7 @@ func (dir *baseDirNode) addOrUpdateChildInodeAttrs(operation, name string, attrs
 				logger.Debug("Children's List. addOrUpdateChildInodeAttrs. Update ", logger.Fields{Operation: operation, Parent: dir.AbsolutePath(), Child: name, NumChildren: len(dir.children)})
 				return node
 			}
-			node = &DirINode{FileSystem: dir.FileSystem, Parent: dir, Attrs: attrs}
+			node = newDirINode(dir.FileSystem, dir, attrs)
 		} else {
 			if fnode, ok := (node).(*FileINode); ok {
 				fnode.Attrs = attrs
@@ -106,7 +111,7 @@ func (dir *baseDirNode) addOrUpdateChildInodeAttrs(operation, name string, attrs
 	} else {
 		var node fs.Node
 		if shouldBeDir {
-			node = &DirINode{FileSystem: dir.FileSystem, Parent: dir, Attrs: attrs}
+			node = newDirINode(dir.FileSystem, dir, attrs)
 		} else {
 			node = &FileINode{FileSystem: dir.FileSystem, Parent: dir, Attrs: attrs}
 		}
@@ -255,6 +260,16 @@ func (dir *baseDirNode) Forget() {
 	// file /some/dir/file then processing forget request
 	// would lead to deleting a correct inode
 	// to fix this issue we have to use inode IDs
+}
+
+func syntheticInode(key string) uint64 {
+	hasher := fnv.New64a()
+	_, _ = hasher.Write([]byte(key))
+	inode := hasher.Sum64()
+	if inode == 0 {
+		return 1
+	}
+	return inode
 }
 
 func nodeAttrs(node fs.Node) (Attrs, bool) {
