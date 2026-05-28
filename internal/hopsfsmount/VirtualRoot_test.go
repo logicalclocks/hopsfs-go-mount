@@ -224,6 +224,21 @@ func TestVirtualDirectoryConfigValidation(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestVirtualDirectoryLeafTargetsAreVisibleButNotMutable(t *testing.T) {
+	cfg := VirtualDirectoryConfig{
+		Name:        "shared-datasets",
+		Paths:       []string{"projA/dataset-1", "projB/dataset-2"},
+		BackendRoot: "/Projects",
+	}
+
+	assert.True(t, cfg.isPathAllowed("/Projects/projA/dataset-1"))
+	assert.True(t, cfg.isPathAllowed("/Projects/projA/dataset-1/file1"))
+	assert.False(t, cfg.mutationAllowed("/Projects/projA/dataset-1"))
+	assert.False(t, cfg.mutationAllowed("/Projects/projB/dataset-2"))
+	assert.True(t, cfg.mutationAllowed("/Projects/projA/dataset-1/file1"))
+	assert.True(t, cfg.mutationAllowed("/Projects/projB/dataset-2/file2"))
+}
+
 func TestVirtualRootCollisionPrefersBackendEntry(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	mockClock := &MockClock{}

@@ -44,7 +44,13 @@ type baseDirNode struct {
 }
 
 func newDirINode(fileSystem *FileSystem, parent Pather, attrs Attrs) *DirINode {
-	return &DirINode{FileSystem: fileSystem, Parent: parent, Attrs: attrs}
+	return &DirINode{
+		baseDirNode: baseDirNode{
+			FileSystem: fileSystem,
+			Parent:     parent,
+			Attrs:      attrs,
+		},
+	}
 }
 
 // Returns absolute path of the dir in HDFS namespace.
