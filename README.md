@@ -81,7 +81,74 @@ Options:
         Umask for the file system. Must be a 3 or 4 digit octal number.
   -version
         Print version
+  -virtualDirectories string
+        Virtual directory specs exposed at the mount root. Either a semicolon-separated
+        compact form (<name>:<backend-root>:<backend-dirs>;...) or a JSON array of
+        {name,paths,backendRoot} objects. See the "Virtual Directories" section below.
 ```
+
+Virtual Directories
+-------------------
+
+The `-virtualDirectories` flag lets the mount surface entries from outside the
+mounted source directory as synthetic directories at the mount root. The
+synthetic tree is a **curated allowlist**: only the paths listed in the spec
+are visible, regardless of what else exists in the backend under the same
+prefix.
+
+This is useful when a mount is rooted at one HopsFS project (`-srcDir`) but
+needs read access to specific datasets from other projects, without
+re-mounting at a wider scope.
+
+### Spec formats
+
+**Compact** (one or more semicolon-separated entries):
+
+```
+<name>:<backend-root>:<path>[,<path>...][;<name>:<backend-root>:<path>...]
+```
+
+**JSON array**:
+
+```json
+[{"name":"<name>","paths":["<path>","..."],"backendRoot":"<root>"}, ...]
+```
+
+### Example
+
+A user mounts their own project but wants read access to specific shared
+datasets from two other projects:
+
+```bash
+./hopsfs-mount \
+  -srcDir=/Projects/MyProject \
+  -virtualDirectories='shared-datasets:/Projects:projectA/datasetA,projectB/datasetB' \
+  rpc.namenode.service.consul:8020 /mnt/hopsfs
+```
+
+The mount root will contain:
+
+- all entries under `/Projects/MyProject` (the real backend contents)
+- plus `shared-datasets/`, a synthetic directory containing:
+  - `projectA/datasetA/` → resolves to backend `/Projects/projectA/datasetA`
+  - `projectB/datasetB/` → resolves to backend `/Projects/projectB/datasetB`
+
+Intermediate path segments are surfaced as synthetic branches automatically;
+in the example above, `projectA/` and `projectB/` appear as synthetic
+directories on the way to the configured leaves.
+
+### Semantics
+
+- The synthetic tree is **read-only**. `Mkdir`, `Create`, `Remove`, `Rename`,
+  and `Setattr` on synthetic nodes return `EPERM`.
+- Operations *inside* a configured leaf (e.g. inside `datasetA/`) behave as
+  normal HopsFS operations, subject to backend permissions.
+- Backend entries that exist under `<backend-root>` but are not listed in the
+  spec are **invisible** through the synthetic tree.
+- If a real entry already exists at `<srcDir>/<name>`, the real entry shadows
+  the virtual entry of the same name.
+- Renaming a configured virtual-root name (e.g. `mv shared-datasets foo`)
+  returns `EPERM` — the name is reserved by configuration.
 
 Testing
 -------

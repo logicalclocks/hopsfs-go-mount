@@ -31,13 +31,13 @@ type HdfsAccessor interface {
 		mode os.FileMode, overwrite bool) (HdfsWriter, error) // Opens HDFS file for writing
 	CreateFileWithGroup(path string,
 		mode os.FileMode, overwrite bool, groupname string) (HdfsWriter, error) // Opens HDFS file for writing with specific group
-	ReadDir(path string) ([]Attrs, error)        // Enumerates HDFS directory
-	Stat(path string) (Attrs, error)             // Retrieves file/directory attributes
-	StatFs() (FsInfo, error)                     // Retrieves HDFS usage
-	Mkdir(path string, mode os.FileMode) error   // Creates a directory
+	ReadDir(path string) ([]Attrs, error)                                 // Enumerates HDFS directory
+	Stat(path string) (Attrs, error)                                      // Retrieves file/directory attributes
+	StatFs() (FsInfo, error)                                              // Retrieves HDFS usage
+	Mkdir(path string, mode os.FileMode) error                            // Creates a directory
 	MkdirWithGroup(path string, mode os.FileMode, groupname string) error // Creates a directory with specific group
-	Remove(path string) error                    // Removes a file or directory
-	Rename(oldPath string, newPath string) error // Renames a file or directory
+	Remove(path string) error                                             // Removes a file or directory
+	Rename(oldPath string, newPath string) error                          // Renames a file or directory
 	Rename2(oldPath string, newPath string,
 		options hdfs.RenameOptions) error // Renames a file or directory
 	EnsureConnected() error                       // Ensures HDFS accessor is connected to the HDFS name node

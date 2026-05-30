@@ -4,10 +4,10 @@
 package hopsfsmount
 
 import (
+	"fmt"
 	"os"
 	"syscall"
 	"time"
-	"fmt"
 
 	"bazil.org/fuse"
 	"hopsworks.ai/hopsfsmount/internal/hopsfsmount/logger"

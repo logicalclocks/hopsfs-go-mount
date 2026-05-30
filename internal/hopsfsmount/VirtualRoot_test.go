@@ -444,6 +444,10 @@ func TestVirtualDirectoryRenameWithinConfiguredLeafPath(t *testing.T) {
 	sharedLeaf, err := sharedProject.(*VirtualDirINode).Lookup(nil, "shared-a")
 	assert.Nil(t, err)
 
+	// Cache file1 before the rename. In production the kernel issues a Lookup before
+	// dispatching a rename, so the inode is normally present in the children cache
+	// when renameInt runs. The cached inode is what renameInt re-parents under the
+	// new name in the destination directory.
 	hdfsAccessor.EXPECT().Stat("/Projects/other-project/shared-a/file1").Return(Attrs{
 		Name:    "file1",
 		Mode:    0644,
@@ -451,7 +455,9 @@ func TestVirtualDirectoryRenameWithinConfiguredLeafPath(t *testing.T) {
 		Gid:     888,
 		Expires: mockClock.Now().Add(CacheAttrsTimeDuration),
 	}, nil)
-	hdfsAccessor.EXPECT().Stat("/Projects/other-project/shared-a/file2").Return(Attrs{}, syscall.ENOENT)
+	_, err = sharedLeaf.(*DirINode).Lookup(nil, "file1")
+	assert.Nil(t, err)
+
 	hdfsAccessor.EXPECT().Rename2("/Projects/other-project/shared-a/file1", "/Projects/other-project/shared-a/file2", gomock.Any()).
 		Return(nil)
 
@@ -461,6 +467,7 @@ func TestVirtualDirectoryRenameWithinConfiguredLeafPath(t *testing.T) {
 	}, sharedLeaf)
 	assert.Nil(t, err)
 
+	// After rename, file2 is in the cache via adoption — no backend Stat needed.
 	renamed, err := sharedLeaf.(*DirINode).Lookup(nil, "file2")
 	assert.Nil(t, err)
 	assert.NotNil(t, renamed)
