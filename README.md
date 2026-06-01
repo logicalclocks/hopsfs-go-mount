@@ -116,7 +116,7 @@ To run only the tests declared in a single file, set `TEST_FILE`:
 TEST_FILE=internal/hopsfsmount/VirtualRoot_test.go make test-kubernetes
 ```
 
-The Kubernetes helper pulls the namenode address from `namenode-external` and
+The Kubernetes helper uses `rpc.namenode.service.consul:8020` by default and
 the PEM material from `namenode-hopsfs-crypto-material`:
 
 ```bash

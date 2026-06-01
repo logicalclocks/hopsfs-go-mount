@@ -10,8 +10,7 @@ KUBECTL_BIN=${KUBECTL_BIN:-kubectl}
 DOCKER_BIN=${DOCKER_BIN:-docker}
 NAMESPACE=${HOPSFS_TEST_NAMESPACE:-hopsworks}
 SECRET_NAME=${HOPSFS_TEST_SECRET_NAME:-namenode-hopsfs-crypto-material}
-SERVICE_NAME=${HOPSFS_TEST_SERVICE_NAME:-namenode-external}
-SERVICE_PORT=${HOPSFS_TEST_SERVICE_PORT:-8020}
+NAMENODE_ADDRESS=${NAMENODE_ADDRESS:-rpc.namenode.service.consul:8020}
 LOCAL_REGISTRY_HOST=${HOPSFS_TEST_LOCAL_REGISTRY_HOST:-dockerlocal:5000}
 CLUSTER_REGISTRY_HOST=${HOPSFS_TEST_CLUSTER_REGISTRY_HOST:-registry.service.consul:30443}
 IMAGE_NAME=${HOPSFS_TEST_IMAGE_NAME:-hopsfs_mount}
@@ -33,27 +32,6 @@ require_command() {
     echo "$message"
     exit 1
   fi
-}
-
-load_service_host() {
-  local ip
-  local hostname
-
-  ip=$("$KUBECTL_BIN" "${KUBECTL_ARGS[@]}" -n "$NAMESPACE" get svc "$SERVICE_NAME" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' || true)
-  hostname=$("$KUBECTL_BIN" "${KUBECTL_ARGS[@]}" -n "$NAMESPACE" get svc "$SERVICE_NAME" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' || true)
-
-  if [ -n "$ip" ]; then
-    printf '%s\n' "$ip"
-    return
-  fi
-
-  if [ -n "$hostname" ]; then
-    printf '%s\n' "$hostname"
-    return
-  fi
-
-  echo "Unable to determine an external host for service $SERVICE_NAME in namespace $NAMESPACE"
-  exit 1
 }
 
 wait_for_pod() {
@@ -137,9 +115,6 @@ TEST=$(printf '%s\n' "$TEST_SELECTION" | sed -n '3p')
 GITCOMMIT=$(git -C "$REPO_ROOT" rev-parse --short HEAD)
 LOCAL_IMAGE="${LOCAL_REGISTRY_HOST}/${IMAGE_NAME}:${IMAGE_VERSION}"
 CLUSTER_IMAGE="${CLUSTER_REGISTRY_HOST}/${IMAGE_NAME}:${IMAGE_VERSION}"
-if [ -z "${NAMENODE_ADDRESS:-}" ]; then
-  NAMENODE_ADDRESS="$(load_service_host):${SERVICE_PORT}"
-fi
 POD_NAME="hopsfs-test-$(date +%s)-$$"
 POD_MANIFEST_BASE=$(mktemp "${TMPDIR:-/tmp}/hopsfs-test-pod.XXXXXX")
 POD_MANIFEST="${POD_MANIFEST_BASE}.yaml"
