@@ -9,6 +9,11 @@ HOSTNAME=`hostname`
 VERSION=$(shell grep "VERSION" internal/hopsfsmount/Version.go | awk '{ print $$3 }' | tr -d \")
 TEST?=Test
 TEST_PACKAGE?=./...
+DOCKER_IMAGE_PREFIX?=
+DOCKER_PLATFORM?=linux/amd64
+TEST_KUBERNETES_USER?=hdfs
+
+.PHONY: all hopsfs-mount clean mock test test-kubernetes
 
 all: hopsfs-mount 
 
@@ -31,4 +36,7 @@ mock: hopsfs-mount \
 
 test: mock
 	go clean -testcache
-	go test -v -p 1 -timeout 20m -run $(TEST) -coverprofile coverage.txt `go list $(TEST_PACKAGE) | grep -v cmd`
+	go test -v -p 1 -timeout 20m -run "$(TEST)" -coverprofile coverage.txt `go list "$(TEST_PACKAGE)" | grep -v cmd`
+
+test-kubernetes:
+	@TEST="$(TEST)" TEST_PACKAGE="$(TEST_PACKAGE)" TEST_FILE="$(TEST_FILE)" DOCKER_USER="$${DOCKER_USER:-$(TEST_KUBERNETES_USER)}" HADOOP_USER_NAME="$${HADOOP_USER_NAME:-$(TEST_KUBERNETES_USER)}" DOCKER_PLATFORM="$(DOCKER_PLATFORM)" NAMENODE_ADDRESS="$(NAMENODE_ADDRESS)" HOPSFS_TEST_TLS="$(HOPSFS_TEST_TLS)" HOPSFS_TEST_LOG_LEVEL="$(HOPSFS_TEST_LOG_LEVEL)" HOPSFS_TEST_NAMESPACE="$(HOPSFS_TEST_NAMESPACE)" HOPSFS_TEST_SECRET_NAME="$(HOPSFS_TEST_SECRET_NAME)" HOPSFS_TEST_SERVICE_NAME="$(HOPSFS_TEST_SERVICE_NAME)" HOPSFS_TEST_SERVICE_PORT="$(HOPSFS_TEST_SERVICE_PORT)" HOPSFS_TEST_LOCAL_REGISTRY_HOST="$(HOPSFS_TEST_LOCAL_REGISTRY_HOST)" HOPSFS_TEST_CLUSTER_REGISTRY_HOST="$(HOPSFS_TEST_CLUSTER_REGISTRY_HOST)" HOPSFS_TEST_IMAGE_NAME="$(HOPSFS_TEST_IMAGE_NAME)" HOPSFS_TEST_IMAGE_VERSION="$(HOPSFS_TEST_IMAGE_VERSION)" ./scripts/test-kubernetes.sh
