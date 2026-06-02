@@ -83,3 +83,45 @@ Options:
         Print version
 ```
 
+Testing
+-------
+
+Run the test suite locally with:
+
+```bash
+make test
+```
+
+Run the test suite inside Kubernetes with:
+
+```bash
+make test-kubernetes
+```
+
+`make test-kubernetes` builds and pushes
+`dockerlocal:5000/hopsfs_mount:3.4.3.1-EE-SANPSHOT`, then starts a pod that
+pulls `registry.service.consul:30443/hopsfs_mount:3.4.3.1-EE-SANPSHOT` and
+runs the tests inside the cluster using the mounted HopsFS certificates.
+
+To point the integration tests at a different HDFS namenode, set
+`NAMENODE_ADDRESS` before running `make test-kubernetes`, for example:
+
+```bash
+NAMENODE_ADDRESS=10.0.0.42:8020 make test-kubernetes
+```
+
+To run only the tests declared in a single file, set `TEST_FILE`:
+
+```bash
+TEST_FILE=internal/hopsfsmount/VirtualRoot_test.go make test-kubernetes
+```
+
+The Kubernetes helper uses `rpc.namenode.service.consul:8020` by default and
+the PEM material from `namenode-hopsfs-crypto-material`:
+
+```bash
+KUBECONFIG=/path/to/kubeconfig make test-kubernetes
+```
+
+Set `KUBECONFIG` to the kubeconfig file for your cluster before running the
+command.

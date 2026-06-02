@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"runtime"
 	"strconv"
+	"strings"
 
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
@@ -18,24 +19,26 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
-	"strings"
 	"sync"
 )
 
 type FileSystem struct {
 	HdfsAccessors       []HdfsAccessor // Interface to access HDFS
 	hdfsAccessorsIndex  int
-	SrcDir              string       // Src directory that will mounted
-	AllowedPrefixes     []string     // List of allowed path prefixes (only those prefixes are exposed via mountpoint)
-	ReadOnly            bool         // Indicates whether mount filesystem with readonly
-	DelaySyncUntilClose bool         // If true, ignore sync/flush operations until file close
-	Mounted             bool         // True if filesystem is mounted
-	RetryPolicy         *RetryPolicy // Retry policy
-	Clock               Clock        // interface to get wall clock time
-	FsInfo              FsInfo       // Usage of HDFS, including capacity, remaining, used sizes.
+	SrcDir              string   // Src directory that will mounted
+	AllowedPrefixes     []string // List of allowed path prefixes (only those prefixes are exposed via mountpoint)
+	VirtualDirectories  []VirtualDirectoryConfig
+	ReadOnly            bool // Indicates whether mount filesystem with readonly
+	DelaySyncUntilClose bool // If true, ignore sync/flush operations until file close
+	Mounted             bool // True if filesystem is mounted
+	RetryPolicy         *RetryPolicy
+	Clock               Clock  // interface to get wall clock time
+	FsInfo              FsInfo // Usage of HDFS, including capacity, remaining, used sizes.
 
-	closeOnUnmount     []io.Closer // list of opened files (zip archives) to be closed on unmount
-	closeOnUnmountLock sync.Mutex  // mutex to protet closeOnUnmount
+	closeOnUnmount            []io.Closer // list of opened files (zip archives) to be closed on unmount
+	closeOnUnmountLock        sync.Mutex  // mutex to protet closeOnUnmount
+	virtualRootCollisions     map[string]bool
+	virtualRootCollisionsLock sync.RWMutex
 }
 
 // Verify that *FileSystem implements necesary FUSE interfaces
@@ -43,8 +46,8 @@ var _ fs.FS = (*FileSystem)(nil)
 var _ fs.FSStatfser = (*FileSystem)(nil)
 
 // Creates an instance of mountable file system
-func NewFileSystem(hdfsAccessors []HdfsAccessor, srcDir string, allowedPrefixes []string, readOnly bool, delaySyncUntilClose bool, retryPolicy *RetryPolicy, clock Clock) (*FileSystem, error) {
-	return &FileSystem{
+func NewFileSystem(hdfsAccessors []HdfsAccessor, srcDir string, allowedPrefixes []string, readOnly bool, delaySyncUntilClose bool, retryPolicy *RetryPolicy, clock Clock, opts ...FileSystemOption) (*FileSystem, error) {
+	filesystem := &FileSystem{
 		HdfsAccessors:       hdfsAccessors,
 		Mounted:             false,
 		AllowedPrefixes:     allowedPrefixes,
@@ -52,7 +55,17 @@ func NewFileSystem(hdfsAccessors []HdfsAccessor, srcDir string, allowedPrefixes 
 		DelaySyncUntilClose: delaySyncUntilClose,
 		RetryPolicy:         retryPolicy,
 		Clock:               clock,
-		SrcDir:              srcDir}, nil
+		SrcDir:              srcDir}
+	for _, opt := range opts {
+		if opt == nil {
+			continue
+		}
+		opt(filesystem)
+	}
+	if err := filesystem.normalizeVirtualDirectoryConfig(); err != nil {
+		return nil, err
+	}
+	return filesystem, nil
 }
 
 // Mounts the filesystem
@@ -102,19 +115,19 @@ func (filesystem *FileSystem) Root() (fs.Node, error) {
 	uid64, _ := strconv.ParseUint(cu.Uid, 10, 32)
 	gid64, _ := strconv.ParseUint(cu.Gid, 10, 32)
 
-	return &DirINode{FileSystem: filesystem, Parent: nil, Attrs: Attrs{
+	return newDirINode(filesystem, nil, Attrs{
 		Inode: 1,
 		Uid:   uint32(uid64),
 		Gid:   uint32(gid64),
 		Mode:  0755 | os.ModeDir,
 		Mtime: filesystem.Clock.Now(),
-		Ctime: filesystem.Clock.Now()},
-	}, nil
+		Ctime: filesystem.Clock.Now(),
+	}), nil
 }
 
 // Returns if given absoute path allowed by any of the prefixes
-func (filesystem *FileSystem) IsPathAllowed(path string) bool {
-	if path == "/" {
+func (filesystem *FileSystem) IsPathAllowed(candidate string) bool {
+	if candidate == "/" {
 		return true
 	}
 	for _, prefix := range filesystem.AllowedPrefixes {
@@ -122,7 +135,13 @@ func (filesystem *FileSystem) IsPathAllowed(path string) bool {
 			return true
 		}
 		p := "/" + prefix
-		if p == path || strings.HasPrefix(path, p+"/") {
+		if p == candidate || strings.HasPrefix(candidate, p+"/") {
+			return true
+		}
+	}
+
+	for _, virtualDirectory := range filesystem.VirtualDirectories {
+		if virtualDirectory.isPathAllowed(candidate) {
 			return true
 		}
 	}

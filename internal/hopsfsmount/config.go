@@ -43,6 +43,7 @@ var EnableDefaultPermissions = true
 var CacheAttrsTimeSecs = 5
 var FallBackUser = "root"
 var FallBackGroup = "root"
+var VirtualDirectoriesSpec string = ""
 var UserUmask string = ""
 var Umask os.FileMode
 var StagingCacheMaxEntries int = 10240
@@ -74,6 +75,7 @@ func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	flag.StringVar(&ForceOverrideGroupname, "hopsFSGroupName", "", "HopsFS groupname")
 	flag.BoolVar(&UseGroupFromHopsFsDatasetPath, "getGroupFromHopsFSDatasetPath", false, "Get the group from hopsfs dataset path. This will work if a hopsworks project is mounted")
 	flag.BoolVar(&AllowOther, "allowOther", true, "Allow other users to use the filesystem")
+	flag.StringVar(&VirtualDirectoriesSpec, "virtualDirectories", "", "Semicolon-separated virtual directory specs exposed at the mount root, in the form <name>:<backend-root>:<backend-dirs>; for example shared-datasets:/Projects:projectA/datasetA,projectB/datasetB")
 	flag.BoolVar(&Version, "version", false, "Print version")
 	flag.BoolVar(&EnablePageCache, "enablePageCache", false, "Enable Linux Page Cache")
 	flag.BoolVar(&EnableDefaultPermissions, "enableDefaultPermissions", true, "Enable FUSE default_permissions option. If disabled, permissions are not checked by kernel and only checked on server side")
