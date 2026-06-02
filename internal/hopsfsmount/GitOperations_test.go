@@ -51,7 +51,7 @@ func cloneTestInternal(t *testing.T, clonePath string, wg *sync.WaitGroup) {
 		}
 	}
 
-	_, err = exec.Command("git", "clone", "https://github.com/logicalclocks/ndb-chef", clonePath).Output()
+	_, err = exec.Command("git", "clone", "https://github.com/logicalclocks/hopsworks-tutorials", clonePath).Output()
 	if err != nil {
 		t.Errorf("Unable to clone the repo. Error: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestGit2(t *testing.T) {
 
 		// mountPoint := "/tmp/mnt"
 		// repoName := "kube-hops-chef.git"
-		repoName := "hops-examples.git"
+		repoName := "hopsworks-tutorials.git"
 		cloneDir := "cloneDir0"
 
 		repoPath := filepath.Join(mountPoint, cloneDir)
@@ -157,31 +157,27 @@ func TestGit2(t *testing.T) {
 		}
 
 		//set config
-		cmd := "git config user.name " + "\"" + committerName + "\""
-		logger.Info(fmt.Sprintf("Set git user.name config command: %s", cmd), nil)
-		err = ExecuteOnPath(repoPath, cmd)
+		err = ExecuteOnPath(repoPath, "git", "config", "user.name", committerName)
 		if err != nil {
 			t.Errorf("Failed %v", err.Error())
 		}
 
-		cmd = "git config user.email " + "\"" + committerEmail + "\""
-		logger.Info(fmt.Sprintf("Set git user.email config command: %s", cmd), nil)
-		err = ExecuteOnPath(repoPath, cmd)
+		err = ExecuteOnPath(repoPath, "git", "config", "user.email", committerEmail)
 		if err != nil {
 			t.Errorf("Failed %v", err.Error())
 		}
 
 		//Apply rebase
-		cmd = "git rebase "
+		cmd := []string{"git", "rebase"}
 		if branchName != "" && remoteName != "" {
-			cmd = cmd + remoteName + "/" + branchName + " " + currentBranch
-			logger.Info(fmt.Sprintf("Applying git rebase:  `%s`", cmd), nil)
+			cmd = append(cmd, remoteName+"/"+branchName, currentBranch)
+			logger.Info(fmt.Sprintf("Applying git rebase:  `%s`", strings.Join(cmd, " ")), nil)
 
-			if err = ExecuteOnPath(repoPath, cmd); err != nil && err.Error() != "already up-to-date" {
+			if err = ExecuteOnPath(repoPath, cmd...); err != nil && err.Error() != "already up-to-date" {
 				logger.Error(err.Error(), nil)
 				logger.Error("Aborting rebase", nil)
-				ExecuteOnPath(repoPath, "git rebase --abort") //Noted if an error occurs the HEAD is detached
-				t.Errorf("Fail %s, %v", cmd, err)
+				ExecuteOnPath(repoPath, "git", "rebase", "--abort") //Noted if an error occurs the HEAD is detached
+				t.Errorf("Fail %s, %v", strings.Join(cmd, " "), err)
 			}
 		} else {
 			t.Errorf("provide branch and origin")
@@ -195,10 +191,13 @@ func TestGit2(t *testing.T) {
 	})
 }
 
-func ExecuteOnPath(path string, cmd string) error {
-	logger.Info(fmt.Sprintf("Executing command `%s` on path %s", cmd, path), nil)
-	args := strings.Split(cmd, " ")
-	c := exec.Command(args[0], args[1:]...)
+func ExecuteOnPath(path string, args ...string) error {
+	logger.Info(fmt.Sprintf("Executing command `%s` on path %s", strings.Join(args, " "), path), nil)
+	commandArgs := append([]string(nil), args...)
+	if len(commandArgs) > 0 && commandArgs[0] == "git" {
+		commandArgs = append([]string{"git", "-c", "safe.directory=" + path}, commandArgs[1:]...)
+	}
+	c := exec.Command(commandArgs[0], commandArgs[1:]...)
 	c.Dir = path
 	c.Env = os.Environ()
 

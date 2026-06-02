@@ -12,24 +12,36 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"bazil.org/fuse/fs/fstestutil"
-	"github.com/colinmarc/hdfs/v2"
 	"golang.org/x/sys/unix"
 	"hopsworks.ai/hopsfsmount/internal/hopsfsmount/logger"
 	"hopsworks.ai/hopsfsmount/internal/hopsfsmount/ugcache"
 )
 
+func uniqueTestName(prefix string) string {
+	return fmt.Sprintf("%s_%d_%d", prefix, time.Now().UnixNano(), rand.Int63())
+}
+
+func uniqueTestPath(mountPoint, prefix string) (string, string) {
+	name := uniqueTestName(prefix)
+	return filepath.Join(mountPoint, name), "/" + name
+}
+
+func uniqueTempPath(prefix string) string {
+	return filepath.Join(os.TempDir(), uniqueTestName(prefix))
+}
+
 func TestReadWriteEmptyFile(t *testing.T) {
 
 	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
 		//create a file, make sure that use and group information is correct
-		r := rand.New(rand.NewSource(time.Now().Local().Unix()))
 		for i := 0; i < 10; i++ {
-			testFile := filepath.Join(mountPoint, fmt.Sprintf("somefile_%d", r.Int()))
+			testFile := filepath.Join(mountPoint, uniqueTestName("somefile"))
 			os.Remove(testFile)
 
 			file, err := os.Create(testFile)
@@ -57,8 +69,7 @@ func TestNegativeLookupCacheIntegration(t *testing.T) {
 	defer func() { CacheAttrsTimeDuration = origCacheAttrsTimeDuration }()
 
 	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
-		testFile := filepath.Join(mountPoint, "neg_cache_integration_test.txt")
-		hdfsPath := "/neg_cache_integration_test.txt"
+		testFile, hdfsPath := uniqueTestPath(mountPoint, "neg_cache_integration_test.txt")
 
 		// Clean up from previous runs
 		hdfsAccessor.Remove(hdfsPath)
@@ -111,8 +122,7 @@ func TestNegativeCacheBackendMkdirIntegration(t *testing.T) {
 	defer func() { CacheAttrsTimeDuration = origCacheAttrsTimeDuration }()
 
 	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
-		testDir := filepath.Join(mountPoint, "neg_cache_mkdir_test")
-		hdfsPath := "/neg_cache_mkdir_test"
+		testDir, hdfsPath := uniqueTestPath(mountPoint, "neg_cache_mkdir_test")
 
 		// Clean up from previous runs
 		hdfsAccessor.Remove(hdfsPath)
@@ -166,10 +176,8 @@ func TestNegativeCacheInvalidatedByFuseRename(t *testing.T) {
 	defer func() { CacheAttrsTimeDuration = origCacheAttrsTimeDuration }()
 
 	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
-		srcFile := filepath.Join(mountPoint, "neg_cache_rename_src.txt")
-		dstFile := filepath.Join(mountPoint, "neg_cache_rename_dst.txt")
-		hdfsSrcPath := "/neg_cache_rename_src.txt"
-		hdfsDstPath := "/neg_cache_rename_dst.txt"
+		srcFile, hdfsSrcPath := uniqueTestPath(mountPoint, "neg_cache_rename_src.txt")
+		dstFile, hdfsDstPath := uniqueTestPath(mountPoint, "neg_cache_rename_dst.txt")
 
 		// Clean up from previous runs
 		hdfsAccessor.Remove(hdfsSrcPath)
@@ -234,8 +242,7 @@ func TestNegativeCacheInvalidatedByFuseRename(t *testing.T) {
 // resulting in an empty file in HDFS.
 func TestPendingWriterSimpleCreate(t *testing.T) {
 	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
-		testFile := filepath.Join(mountPoint, "pending_writer_touch.txt")
-		hdfsPath := "/pending_writer_touch.txt"
+		testFile, hdfsPath := uniqueTestPath(mountPoint, "pending_writer_touch.txt")
 		hdfsAccessor.Remove(hdfsPath)
 
 		// Create and immediately close (like touch)
@@ -271,8 +278,7 @@ func TestPendingWriterSimpleCreate(t *testing.T) {
 // Verifies the pending DFS writer is reused on first flush (no redundant Remove+Recreate).
 func TestPendingWriterSimpleWrite(t *testing.T) {
 	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
-		testFile := filepath.Join(mountPoint, "pending_writer_write.txt")
-		hdfsPath := "/pending_writer_write.txt"
+		testFile, hdfsPath := uniqueTestPath(mountPoint, "pending_writer_write.txt")
 		hdfsAccessor.Remove(hdfsPath)
 
 		testData := "hello from pending writer test"
@@ -306,8 +312,7 @@ func TestPendingWriterSimpleWrite(t *testing.T) {
 // First flush should reuse the pending writer. Second flush should use Remove+Recreate path.
 func TestPendingWriterMultipleFlushes(t *testing.T) {
 	withMount(t, "/", false /* sync on flush, not on close */, func(mountPoint string, hdfsAccessor HdfsAccessor) {
-		testFile := filepath.Join(mountPoint, "pending_writer_multi_flush.txt")
-		hdfsPath := "/pending_writer_multi_flush.txt"
+		testFile, hdfsPath := uniqueTestPath(mountPoint, "pending_writer_multi_flush.txt")
 		hdfsAccessor.Remove(hdfsPath)
 
 		// Create and write first batch
@@ -375,8 +380,7 @@ func TestPendingWriterMultipleFlushes(t *testing.T) {
 // Verifies that the pending writer optimization works correctly with concurrent handles.
 func TestPendingWriterMultiHandleFlush(t *testing.T) {
 	withMount(t, "/", false /* sync on flush */, func(mountPoint string, hdfsAccessor HdfsAccessor) {
-		testFile := filepath.Join(mountPoint, "pending_writer_multi_handle.txt")
-		hdfsPath := "/pending_writer_multi_handle.txt"
+		testFile, hdfsPath := uniqueTestPath(mountPoint, "pending_writer_multi_handle.txt")
 		hdfsAccessor.Remove(hdfsPath)
 
 		// First handle: create and write
@@ -445,7 +449,7 @@ func TestSimple(t *testing.T) {
 
 	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
 		for i := 0; i < 3; i++ {
-			testFile := filepath.Join(mountPoint, fmt.Sprintf("somefile_%d", i))
+			testFile := filepath.Join(mountPoint, uniqueTestName("somefile"))
 			os.Remove(testFile)
 			logger.Info(fmt.Sprintf("New file: %s", testFile), nil)
 			if err := createFile(testFile, "some data"); err != nil {
@@ -464,15 +468,15 @@ func TestRename1(t *testing.T) {
 		//   1. rename file1 -> file2
 		//   2. rename file2 -> file1
 		//   3. check file stats
-		file1 := filepath.Join(mountPoint, "file1")
-		file2 := filepath.Join(mountPoint, "file2")
+		file1 := filepath.Join(mountPoint, uniqueTestName("file1"))
+		file2 := filepath.Join(mountPoint, uniqueTestName("file2"))
 		t.Run("test1", func(t *testing.T) {
 			renameTestInt(t, file1, file2)
 		})
 
-		file1 = filepath.Join(mountPoint, "file1")
-		dir := filepath.Join(mountPoint, "/dir")
-		file2 = filepath.Join(mountPoint, "/dir/file2")
+		file1 = filepath.Join(mountPoint, uniqueTestName("file1"))
+		dir := filepath.Join(mountPoint, uniqueTestName("dir"))
+		file2 = filepath.Join(dir, uniqueTestName("file2"))
 		rmDir(t, dir)
 		mkdir(t, dir)
 		t.Run("test2", func(t *testing.T) {
@@ -520,7 +524,7 @@ func TestTruncate(t *testing.T) {
 
 	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
 		//create a file, make sure that use and group information is correct
-		testFile := filepath.Join(mountPoint, "somefile")
+		testFile := filepath.Join(mountPoint, uniqueTestName("somefile"))
 		os.Remove(testFile)
 
 		logger.Info(fmt.Sprintf("New file: %s", testFile), nil)
@@ -554,7 +558,7 @@ func TestTruncateGreaterLength(t *testing.T) {
 
 	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
 		//create a file, make sure that use and group information is correct
-		testFile1 := filepath.Join(mountPoint, "somefile1")
+		testFile1 := filepath.Join(mountPoint, uniqueTestName("somefile1"))
 		os.Remove(testFile1)
 		truncateLen := int64(1024 * 1024)
 
@@ -613,8 +617,8 @@ func TestMultipleRWCllients(t *testing.T) {
 	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
 		//create a file, make sure that use and group information is correct
 		// mountPoint = "/tmp"
-		testFile1 := filepath.Join(mountPoint, "somefile")
-		testFile2 := filepath.Join(mountPoint, "somefile.bak")
+		testFile1 := filepath.Join(mountPoint, uniqueTestName("somefile"))
+		testFile2 := filepath.Join(mountPoint, uniqueTestName("somefile.bak"))
 		logger.Info(fmt.Sprintf("New file: %s", testFile1), nil)
 		if err := createFile(testFile1, "initial data\nadsf\n"); err != nil {
 			t.Fatalf("Failed to write %v", err)
@@ -655,10 +659,14 @@ func TestMountSubDir(t *testing.T) {
 	//mount and create some files and dirs
 	dirs := 5
 	filesPdir := 3
+	rootName := uniqueTestName("mount-subdir")
+	rootHDFSPath := "/" + rootName
 	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
 		//create some directories and files
+		rootDir := filepath.Join(mountPoint, rootName)
+		mkdir(t, rootDir)
 		for i := 0; i < dirs; i++ {
-			dir := filepath.Join(mountPoint, "dir"+strconv.Itoa(i))
+			dir := filepath.Join(rootDir, "dir"+strconv.Itoa(i))
 			mkdir(t, dir)
 			for j := 0; j < filesPdir; j++ {
 				f := filepath.Join(dir, "file"+strconv.Itoa(j))
@@ -675,7 +683,7 @@ func TestMountSubDir(t *testing.T) {
 	})
 
 	// remount only one dir
-	withMount(t, "/dir1", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
+	withMount(t, filepath.Join(rootHDFSPath, "dir1"), DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
 		content := listDir(t, mountPoint)
 		if len(content) != filesPdir {
 			t.Errorf("Failed. Expected == %d, Got %d ", filesPdir, len(content))
@@ -688,8 +696,9 @@ func TestMountSubDir(t *testing.T) {
 	// remount every thing for cleanup
 	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
 		//delete all the files and dirs created in this test
+		rootDir := filepath.Join(mountPoint, rootName)
 		for i := 0; i < dirs; i++ {
-			dir := filepath.Join(mountPoint, "dir"+strconv.Itoa(i))
+			dir := filepath.Join(rootDir, "dir"+strconv.Itoa(i))
 			for j := 0; j < filesPdir; j++ {
 				f := filepath.Join(dir, "file"+strconv.Itoa(j))
 				err := rmFile(f)
@@ -703,55 +712,66 @@ func TestMountSubDir(t *testing.T) {
 			}
 
 		}
+		err := rmFile(rootDir)
+		if err != nil {
+			t.Fatalf("Deleting file failed %s, Error: %v", rootDir, err)
+		}
 	})
 }
 
 // perform lots of seek operations on large files
 func TestSeekLargeFile(t *testing.T) {
-	diskSeekTestFile := "/tmp/diskSeekTestLargeFile"
-	dfsSeekTestFile := "/dfsSeekTestLargeFile"
+	diskSeekTestFile := uniqueTempPath("diskSeekTestLargeFile")
+	dfsSeekTestFile := "/" + uniqueTestName("dfsSeekTestLargeFile")
 	seekTest(t, 10000000 /*numbers in the file*/, diskSeekTestFile, dfsSeekTestFile)
 }
 
 // perform lots of seek operations on small files
 func TestSeekSmallFile(t *testing.T) {
-	diskSeekTestFile := "/tmp/diskSeekTestSmallFile"
-	dfsSeekTestFile := "/dfsSeekTestSmallFile"
+	diskSeekTestFile := uniqueTempPath("diskSeekTestSmallFile")
+	dfsSeekTestFile := "/" + uniqueTestName("dfsSeekTestSmallFile")
 	seekTest(t, 10000 /*numbers in the file*/, diskSeekTestFile, dfsSeekTestFile)
 }
 
 func seekTest(t *testing.T, dataSize int, diskSeekTestFile string, dfsSeekTestFile string) {
-	addresses := make([]string, 1)
-	addresses[0] = "127.0.0.1:8020"
+	addresses := strings.Join(testNameNodeAddresses(), ",")
+	if err := InitConnectionUser(); err != nil {
+		t.Fatalf("Error/InitConnectionUser: %v", err)
+	}
 
-	user, err := ugcache.CurrentUserName()
+	tlsEnabled, err := testTLSEnabled()
 	if err != nil {
-		t.Fatalf("couldn't determine user: %s", err)
+		t.Fatalf("%v", err)
 	}
 
-	hdfsOptions := hdfs.ClientOptions{
-		Addresses: addresses,
-		User:      user,
-	}
-
-	client, err := hdfs.NewClient(hdfsOptions)
+	hdfsAccessor, err := NewHdfsAccessor(addresses, WallClock{}, TLSConfig{
+		TLS:               tlsEnabled,
+		RootCABundle:      RootCABundle,
+		ClientCertificate: ClientCertificate,
+		ClientKey:         ClientKey,
+	})
 	if err != nil {
 		t.Fatalf("Failed %v", err)
 	}
-	defer client.Close()
+	retryPolicy := NewDefaultRetryPolicy(WallClock{})
+	ftHdfsAccessor := NewFaultTolerantHdfsAccessor(hdfsAccessor, retryPolicy)
+	if err := ftHdfsAccessor.EnsureConnected(); err != nil {
+		t.Fatalf("Failed %v", err)
+	}
+	defer ftHdfsAccessor.Close()
+	defer os.Remove(diskSeekTestFile)
 
-	prepare(t, client, dataSize, diskSeekTestFile, dfsSeekTestFile)
+	prepare(t, ftHdfsAccessor, dataSize, diskSeekTestFile, dfsSeekTestFile)
+	testSeeks(t, ftHdfsAccessor, diskSeekTestFile, dfsSeekTestFile)
 
-	testSeeks(t, client, diskSeekTestFile, dfsSeekTestFile)
-
-	err = client.Remove(dfsSeekTestFile)
+	err = ftHdfsAccessor.Remove(dfsSeekTestFile)
 	if err != nil {
 		t.Fatalf("Failed %v", err)
 	}
 
 }
 
-func prepare(t *testing.T, client *hdfs.Client, dataSize int, diskTestFile string, dfsTestFile string) {
+func prepare(t *testing.T, client HdfsAccessor, dataSize int, diskTestFile string, dfsTestFile string) {
 
 	logger.Info("Creating test data ...", nil)
 	recreateDFSFile := false
@@ -774,7 +794,7 @@ func prepare(t *testing.T, client *hdfs.Client, dataSize int, diskTestFile strin
 	}
 
 	if _, err := client.Stat(dfsTestFile); errors.Is(err, os.ErrNotExist) {
-		dfsWriter, err := client.CreateFile(dfsTestFile, 3, 1024*1024, os.FileMode(0777), true, true)
+		dfsWriter, err := client.CreateFile(dfsTestFile, os.FileMode(0777), true)
 		if err != nil {
 			t.Fatalf("Failed %v", err)
 		}
@@ -802,16 +822,24 @@ func prepare(t *testing.T, client *hdfs.Client, dataSize int, diskTestFile strin
 			}
 		}
 
-		diskReader.Close()
-		dfsWriter.Close()
+		if err := diskReader.Close(); err != nil {
+			t.Fatalf("Failed %v", err)
+		}
+		if err := dfsWriter.Close(); err != nil {
+			t.Fatalf("Failed %v", err)
+		}
 	}
 
 }
 
-func testSeeks(t *testing.T, client *hdfs.Client, diskTestFile string, dfsTestFile string) {
+func testSeeks(t *testing.T, client HdfsAccessor, diskTestFile string, dfsTestFile string) {
 	fileInfo, _ := os.Stat(diskTestFile)
 	diskReader, _ := os.Open(diskTestFile)
-	dfsReader, _ := client.Open(dfsTestFile)
+	dfsReader, err := client.OpenRead(dfsTestFile)
+	if err != nil {
+		t.Fatalf("Failed %v", err)
+	}
+	defer dfsReader.Close()
 	bufferSize := 4 * 1024
 	for i := 0; i < 10000; i++ {
 
@@ -842,7 +870,11 @@ func testSeeks(t *testing.T, client *hdfs.Client, diskTestFile string, dfsTestFi
 		//fmt.Printf("%d) Seek %d, Bytes read from disk are %d, error: %v. Data: %s\n", i, seek, diskReadBytes, diskErr, string(buffer1)[:30])
 
 		buffer2 := make([]byte, bufferSize)
-		n, err = dfsReader.Seek(seek, 0)
+		err = dfsReader.Seek(seek)
+		if err != nil {
+			t.Fatalf("Error in seek %v", err)
+		}
+		n, err = dfsReader.Position()
 		if n != seek {
 			t.Fatalf("DFS seek did not skip correct number of bytes. Expected: %d, Got: %d", seek, n)
 		}
@@ -894,10 +926,11 @@ func testSeeks(t *testing.T, client *hdfs.Client, diskTestFile string, dfsTestFi
 }
 
 func TestMultipleMountPoints(t *testing.T) {
+	testName := uniqueTestName("somefile")
 
 	//clean up old runs
 	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
-		testFile := filepath.Join(mountPoint, "somefile")
+		testFile := filepath.Join(mountPoint, testName)
 		rmFile(testFile)
 	})
 
@@ -939,13 +972,13 @@ func TestMultipleMountPoints(t *testing.T) {
 	}
 
 	go withMount(t, "/", false, func(mountPoint string, hdfsAccessor HdfsAccessor) {
-		testFile := filepath.Join(mountPoint, "somefile")
+		testFile := filepath.Join(mountPoint, testName)
 		work(0, testFile)
 		wg.Done()
 	})
 
 	go withMount(t, "/", false, func(mountPoint string, hdfsAccessor HdfsAccessor) {
-		testFile := filepath.Join(mountPoint, "somefile")
+		testFile := filepath.Join(mountPoint, testName)
 		work(1, testFile)
 		wg.Done()
 	})
@@ -954,7 +987,7 @@ func TestMultipleMountPoints(t *testing.T) {
 
 	// the file must exist
 	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
-		testFile := filepath.Join(mountPoint, "somefile")
+		testFile := filepath.Join(mountPoint, testName)
 		logger.Info("Checking and Cleaing up", logger.Fields{Path: testFile})
 
 		data, err := readFile(t, testFile)
@@ -981,6 +1014,49 @@ func TestMultipleMountPoints(t *testing.T) {
 	})
 }
 
+func testNameNodeAddress() string {
+	if address := strings.TrimSpace(os.Getenv("NAMENODE_ADDRESS")); address != "" {
+		return address
+	}
+
+	return "127.0.0.1:8020"
+}
+
+func testConnectionUserName() (string, error) {
+	if userName := strings.TrimSpace(os.Getenv("HADOOP_USER_NAME")); userName != "" {
+		return userName, nil
+	}
+
+	return ugcache.CurrentUserName()
+}
+
+func testTLSEnabled() (bool, error) {
+	rawValue := strings.TrimSpace(os.Getenv("HOPSFS_TEST_TLS"))
+	if rawValue == "" {
+		return false, nil
+	}
+
+	enabled, err := strconv.ParseBool(rawValue)
+	if err != nil {
+		return false, fmt.Errorf("invalid HOPSFS_TEST_TLS value %q: %w", rawValue, err)
+	}
+
+	return enabled, nil
+}
+
+func testNameNodeAddresses() []string {
+	rawAddresses := testNameNodeAddress()
+	addresses := strings.Split(rawAddresses, ",")
+	filtered := make([]string, 0, len(addresses))
+	for _, address := range addresses {
+		if trimmed := strings.TrimSpace(address); trimmed != "" {
+			filtered = append(filtered, trimmed)
+		}
+	}
+
+	return filtered
+}
+
 func withMount(t testing.TB, srcDir string, delaySyncUntilClose bool, fn func(mntPath string, hdfsAccessor HdfsAccessor)) {
 	t.Helper()
 
@@ -999,12 +1075,20 @@ func withMount(t testing.TB, srcDir string, delaySyncUntilClose bool, fn func(mn
 	// Wrapping with FaultTolerantHdfsAccessor
 	retryPolicy := NewDefaultRetryPolicy(WallClock{})
 	retryPolicy.MaxAttempts = 1 // for quick failure
-	logger.InitLogger("ERROR", false, "")
+	logLevel := strings.TrimSpace(os.Getenv("HOPSFS_TEST_LOG_LEVEL"))
+	if logLevel == "" {
+		logLevel = "ERROR"
+	}
+	logger.InitLogger(logLevel, false, "")
 	if err := InitConnectionUser(); err != nil {
 		t.Fatalf("Error/InitConnectionUser: %v", err)
 	}
-	hdfsAccessor, _ := NewHdfsAccessor("127.0.0.1:8020", WallClock{}, TLSConfig{TLS: false, RootCABundle: RootCABundle, ClientCertificate: ClientCertificate, ClientKey: ClientKey})
-	err := hdfsAccessor.EnsureConnected()
+	tlsEnabled, err := testTLSEnabled()
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	hdfsAccessor, _ := NewHdfsAccessor(testNameNodeAddress(), WallClock{}, TLSConfig{TLS: tlsEnabled, RootCABundle: RootCABundle, ClientCertificate: ClientCertificate, ClientKey: ClientKey})
+	err = hdfsAccessor.EnsureConnected()
 	if err != nil {
 		t.Fatalf(fmt.Sprintf("Error/NewHdfsAccessor: %v ", err), nil)
 	}
@@ -1172,7 +1256,7 @@ func TestConcurrentWritesWithFlush2(t *testing.T) {
 func testConcurrentWritesWithFlushInt(t *testing.T, delaySyncUntilClose bool) {
 	withMount(t, "/", delaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
 		// Create test directory
-		testDir := filepath.Join(mountPoint, "test-concurrent-writes")
+		testDir := filepath.Join(mountPoint, uniqueTestName("test-concurrent-writes"))
 		os.RemoveAll(testDir) // Clean up from previous runs
 		mkdir(t, testDir)
 		defer os.RemoveAll(testDir)
