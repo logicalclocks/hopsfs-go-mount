@@ -120,38 +120,6 @@ func TestPathRelativeToBackendRoot(t *testing.T) {
 	}
 }
 
-// TestMutationAllowed — descendants-of-leaf only. Leaf itself and synthetic
-// branches must be rejected (structural).
-func TestMutationAllowed(t *testing.T) {
-	config := VirtualDirectoryConfig{
-		Name:        "shared",
-		Paths:       []string{"projA/dsA", "projB/some_dir/dsC"},
-		BackendRoot: "/Projects",
-	}
-	cases := []struct {
-		name      string
-		candidate string
-		want      bool
-	}{
-		{"file-inside-leaf", "/Projects/projA/dsA/file", true},
-		{"deep-inside-leaf", "/Projects/projA/dsA/sub/sub2/file", true},
-		{"file-inside-deep-leaf", "/Projects/projB/some_dir/dsC/file", true},
-		{"leaf-itself", "/Projects/projA/dsA", false},
-		{"deep-leaf-itself", "/Projects/projB/some_dir/dsC", false},
-		{"branch", "/Projects/projA", false},
-		{"intermediate-branch", "/Projects/projB/some_dir", false},
-		{"backend-root", "/Projects", false},
-		{"outside-backend-root", "/other/file", false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := config.mutationAllowed(tc.candidate); got != tc.want {
-				t.Errorf("mutationAllowed(%q) = %v, want %v", tc.candidate, got, tc.want)
-			}
-		})
-	}
-}
-
 // TestIsPathAllowed — visible for read/list: mount-side virtual root, the
 // configured leaf, and any descendant of the leaf. NOT branches.
 func TestIsPathAllowed(t *testing.T) {

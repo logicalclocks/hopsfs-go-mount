@@ -235,22 +235,6 @@ func (config VirtualDirectoryConfig) pathRelativeToBackendRoot(candidate string)
 	return rel, true
 }
 
-// mutationAllowed allows mutations only inside descendants of a configured leaf.
-// The leaf path itself is structural metadata and should not be renamed or replaced.
-func (config VirtualDirectoryConfig) mutationAllowed(candidate string) bool {
-	relPath, ok := config.pathRelativeToBackendRoot(candidate)
-	if !ok {
-		return false
-	}
-
-	for _, virtualPath := range config.Paths {
-		if strings.HasPrefix(relPath, virtualPath+"/") {
-			return true
-		}
-	}
-	return false
-}
-
 // isPathAllowed keeps the configured leaf itself visible for read/list operations
 // while also allowing descendants under that leaf.
 func (config VirtualDirectoryConfig) isPathAllowed(candidate string) bool {

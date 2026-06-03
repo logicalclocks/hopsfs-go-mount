@@ -199,6 +199,9 @@ func (dir *VirtualDirINode) lookupVirtualDirectoryChild(operation, name string) 
 		if node := dir.getChildInode(operation, name); node != nil && nodeAttrsFresh(node, dir.FileSystem.Clock.Now()) {
 			return node, nil
 		}
+		if dir.checkNegativeCache(operation, name) {
+			return nil, syscall.ENOENT
+		}
 		return dir.statInodeInHopsFS(operation, name, &Attrs{})
 	}
 

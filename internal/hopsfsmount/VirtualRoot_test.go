@@ -245,10 +245,6 @@ func TestVirtualDirectoryLeafTargetsAreVisibleButNotMutable(t *testing.T) {
 
 	assert.True(t, cfg.isPathAllowed("/Projects/projA/dataset-1"))
 	assert.True(t, cfg.isPathAllowed("/Projects/projA/dataset-1/file1"))
-	assert.False(t, cfg.mutationAllowed("/Projects/projA/dataset-1"))
-	assert.False(t, cfg.mutationAllowed("/Projects/projB/dataset-2"))
-	assert.True(t, cfg.mutationAllowed("/Projects/projA/dataset-1/file1"))
-	assert.True(t, cfg.mutationAllowed("/Projects/projB/dataset-2/file2"))
 }
 
 func TestVirtualRootCollisionPrefersBackendEntry(t *testing.T) {
