@@ -1,46 +1,26 @@
-// Copyright (c) Microsoft. All rights reserved.
 // Copyright (c) Hopsworks AB. All rights reserved.
 // Licensed under the MIT license. See LICENSE file in the project root for details.
 package hopsfsmount
 
 import (
 	"hash/fnv"
-	"os"
-	"path"
 	"sync"
 	"syscall"
 	"time"
 
-	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
-	"golang.org/x/net/context"
 	"hopsworks.ai/hopsfsmount/internal/hopsfsmount/logger"
 )
 
-type inodeStatter interface {
-	Pather
-	statInodeInHopsFS(operation, name string, attrs *Attrs) (fs.Node, error)
-}
-
-func parentStatInodeInHopsFS(parent Pather, operation, name string, attrs *Attrs) (fs.Node, error) {
-	if parent == nil {
-		return nil, syscall.ENOENT
-	}
-	if statter, ok := parent.(inodeStatter); ok {
-		return statter.statInodeInHopsFS(operation, name, attrs)
-	}
-	return nil, syscall.ENOENT
-}
-
 // baseDirNode encapsulates the common cached directory state shared by real and virtual directories.
 type baseDirNode struct {
-	FileSystem    *FileSystem        // Pointer to the owning filesystem
-	Attrs         Attrs              // Cached attributes of the directory, TODO: add TTL
-	Parent        Pather             // Pointer to the parent directory (allows computing fully-qualified paths on demand)
-	children      map[string]fs.Node // Cached directory entries
-	negativeCache map[string]time.Time
-	childrenMutex sync.Mutex
-	dirMutex      sync.Mutex
+	FileSystem    *FileSystem          // Pointer to the owning filesystem
+	Attrs         Attrs                // Cached attributes of the directory, TODO: add TTL
+	Parent        Pather               // Pointer to the parent directory (allows computing fully-qualified paths on demand)
+	children      map[string]fs.Node   // Cached directory entries
+	negativeCache map[string]time.Time // Caches "not found" results: name -> expiry time
+	childrenMutex sync.Mutex           // for concurrent read and updates of children/negativeCache
+	dirMutex      sync.Mutex           // One read or write operation on a directory at a time
 }
 
 func newDirINode(fileSystem *FileSystem, parent Pather, attrs Attrs) *DirINode {
@@ -51,19 +31,6 @@ func newDirINode(fileSystem *FileSystem, parent Pather, attrs Attrs) *DirINode {
 			Attrs:      attrs,
 		},
 	}
-}
-
-// Returns absolute path of the dir in HDFS namespace.
-func (dir *baseDirNode) AbsolutePath() string {
-	if dir.Parent == nil {
-		return dir.FileSystem.SrcDir
-	}
-	return path.Join(dir.Parent.AbsolutePath(), dir.Attrs.Name)
-}
-
-// Returns absolute path of the child item of this directory.
-func (dir *baseDirNode) AbsolutePathForChild(name string) string {
-	return path.Join(dir.AbsolutePath(), name)
 }
 
 func (dir *baseDirNode) getChildInode(operation, name string) fs.Node {
@@ -77,54 +44,12 @@ func (dir *baseDirNode) getChildInode(operation, name string) fs.Node {
 
 	node := dir.children[name]
 	if node != nil {
-		logger.Debug("Children's List. getChildInode ", logger.Fields{Operation: operation, Parent: dir.AbsolutePath(), Child: name, NumChildren: len(dir.children)})
+		logger.Debug("Children's List. getChildInode ", logger.Fields{Operation: operation, Child: name, NumChildren: len(dir.children)})
 	} else {
-		logger.Debug("Children's List. getChildInode. Not Found  ", logger.Fields{Operation: operation, Parent: dir.AbsolutePath(), Child: name, NumChildren: len(dir.children)})
+		logger.Debug("Children's List. getChildInode. Not Found  ", logger.Fields{Operation: operation, Child: name, NumChildren: len(dir.children)})
 	}
 
 	return node
-}
-
-func (dir *baseDirNode) addOrUpdateChildInodeAttrs(operation, name string, attrs Attrs) fs.Node {
-	dir.lockChildrenMutex()
-	defer dir.unlockChildrenMutex()
-
-	if dir.children == nil {
-		dir.children = make(map[string]fs.Node)
-	}
-
-	shouldBeDir := (attrs.Mode & os.ModeDir) != 0
-	if node, ok := dir.children[name]; ok {
-		if shouldBeDir {
-			if dnode, ok := (node).(*DirINode); ok {
-				dnode.Attrs = attrs
-				logger.Debug("Children's List. addOrUpdateChildInodeAttrs. Update ", logger.Fields{Operation: operation, Parent: dir.AbsolutePath(), Child: name, NumChildren: len(dir.children)})
-				return node
-			}
-			node = newDirINode(dir.FileSystem, dir, attrs)
-		} else {
-			if fnode, ok := (node).(*FileINode); ok {
-				fnode.Attrs = attrs
-				logger.Debug("Children's List. addOrUpdateChildInodeAttrs. Update ", logger.Fields{Operation: operation, Parent: dir.AbsolutePath(), Child: name, NumChildren: len(dir.children)})
-				return node
-			}
-			node = &FileINode{FileSystem: dir.FileSystem, Parent: dir, Attrs: attrs}
-		}
-
-		dir.children[name] = node
-		logger.Debug("Children's List. addOrUpdateChildInodeAttrs. Replace ", logger.Fields{Operation: operation, Parent: dir.AbsolutePath(), Child: name, NumChildren: len(dir.children)})
-		return node
-	} else {
-		var node fs.Node
-		if shouldBeDir {
-			node = newDirINode(dir.FileSystem, dir, attrs)
-		} else {
-			node = &FileINode{FileSystem: dir.FileSystem, Parent: dir, Attrs: attrs}
-		}
-		dir.children[name] = node
-		logger.Debug("Children's List. addOrUpdateChildInodeAttrs. Add ", logger.Fields{Operation: operation, Parent: dir.AbsolutePath(), Child: name, NumChildren: len(dir.children)})
-		return node
-	}
 }
 
 func (dir *baseDirNode) removeChildInode(operation, name string) {
@@ -133,7 +58,7 @@ func (dir *baseDirNode) removeChildInode(operation, name string) {
 
 	if dir.children != nil {
 		delete(dir.children, name)
-		logger.Debug("Children's List. removeChildInode ", logger.Fields{Operation: operation, Parent: dir.AbsolutePath(), Child: name, NumChildren: len(dir.children)})
+		logger.Debug("Children's List. removeChildInode ", logger.Fields{Operation: operation, Child: name, NumChildren: len(dir.children)})
 	}
 }
 
@@ -147,31 +72,12 @@ func (dir *baseDirNode) adoptChildInode(operation, name string, node fs.Node) {
 	}
 
 	if _, ok := dir.children[name]; ok {
-		logger.Debug("Children's List. Adopted inode. Replaced existing node ", logger.Fields{Operation: operation, Parent: dir.AbsolutePath(), Child: name, NumChildren: len(dir.children)})
+		logger.Debug("Children's List. Adopted inode. Replaced existing node ", logger.Fields{Operation: operation, Child: name, NumChildren: len(dir.children)})
 	} else {
-		logger.Debug("Children's List. Adopted inode. Added new node ", logger.Fields{Operation: operation, Parent: dir.AbsolutePath(), Child: name, NumChildren: len(dir.children)})
+		logger.Debug("Children's List. Adopted inode. Added new node ", logger.Fields{Operation: operation, Child: name, NumChildren: len(dir.children)})
 	}
 
 	dir.children[name] = node
-}
-
-// Performs Stat() query on the backend.
-func (dir *baseDirNode) statInodeInHopsFS(operation, name string, attrs *Attrs) (fs.Node, error) {
-	a, err := dir.FileSystem.getDFSConnector().Stat(path.Join(dir.AbsolutePath(), name))
-	if err != nil {
-		logger.Info("Stat failed on backend", logger.Fields{Operation: operation, Path: path.Join(dir.AbsolutePath(), name), Error: err})
-		dir.removeChildInode(operation, name)
-		if err == syscall.ENOENT {
-			dir.addNegativeCacheEntry(name)
-		}
-		return nil, err
-	}
-	*attrs = a
-
-	inode := dir.addOrUpdateChildInodeAttrs(operation, name, *attrs)
-	logger.Info("Stat successful on backend", logger.Fields{Operation: operation, Path: path.Join(dir.AbsolutePath(), name), FileSize: attrs.Size,
-		IsDir: attrs.Mode.IsDir(), IsRegular: attrs.Mode.IsRegular()})
-	return inode, nil
 }
 
 func (dir *baseDirNode) checkNegativeCache(operation, name string) bool {
@@ -192,10 +98,12 @@ func (dir *baseDirNode) checkNegativeCache(operation, name string) bool {
 		return false
 	}
 
-	logger.Debug("Negative cache hit", logger.Fields{Operation: operation, Parent: dir.AbsolutePath(), Child: name})
+	logger.Debug("Negative cache hit", logger.Fields{Operation: operation, Child: name})
 	return true
 }
 
+// addNegativeCacheEntry adds a name to the negative cache with TTL = CacheAttrsTimeDuration.
+// Must NOT hold childrenMutex when calling this.
 func (dir *baseDirNode) addNegativeCacheEntry(name string) {
 	dir.lockChildrenMutex()
 	defer dir.unlockChildrenMutex()
@@ -207,6 +115,8 @@ func (dir *baseDirNode) addNegativeCacheEntry(name string) {
 	dir.negativeCache[name] = dir.FileSystem.Clock.Now().Add(CacheAttrsTimeDuration)
 }
 
+// removeNegativeCacheEntry removes a name from the negative cache.
+// Must NOT hold childrenMutex when calling this.
 func (dir *baseDirNode) removeNegativeCacheEntry(name string) {
 	dir.lockChildrenMutex()
 	defer dir.unlockChildrenMutex()
@@ -232,29 +142,6 @@ func (dir *baseDirNode) unlockChildrenMutex() {
 	dir.childrenMutex.Unlock()
 }
 
-func (dir *baseDirNode) Symlink(ctx context.Context, req *fuse.SymlinkRequest) (fs.Node, error) {
-	logger.Error("Unsupported Symlink operation.", logger.Fields{Operation: Symlink, Path: dir.AbsolutePath()})
-	return nil, syscall.ENOTSUP
-}
-
-func (dir *baseDirNode) Readlink(ctx context.Context, req *fuse.ReadlinkRequest) (string, error) {
-	logger.Error("Unsupported Readlink operation.", logger.Fields{Operation: ReadLink, Path: dir.AbsolutePath()})
-	return "", syscall.ENOTSUP
-}
-
-func (dir *baseDirNode) Link(ctx context.Context, req *fuse.LinkRequest, old fs.Node) (fs.Node, error) {
-	logger.Error("Unsupported Link operation.", logger.Fields{Operation: Link, Path: dir.AbsolutePath()})
-	return nil, syscall.ENOTSUP
-}
-
-// https://libfuse.github.io/doxygen/structfuse__operations.html#abaa2a0bdc9b9955a399ea6973f6f4927
-// Synchronize directory contents
-// All dir operations are first performed on the backend. So no-op
-func (dir *baseDirNode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
-	logger.Info("Fsync called on Dir ", logger.Fields{Operation: Fsync, Path: dir.AbsolutePath()})
-	return nil
-}
-
 func (dir *baseDirNode) Forget() {
 	dir.lockMutex()
 	defer dir.unlockMutex()
@@ -268,16 +155,43 @@ func (dir *baseDirNode) Forget() {
 	// to fix this issue we have to use inode IDs
 }
 
+// inodeStatter is the interface satisfied by directory nodes that can stat their
+// children against the backend. Used by parentStatInodeInHopsFS to dispatch a stat
+// through a parent of unknown concrete type.
+type inodeStatter interface {
+	Pather
+	statInodeInHopsFS(operation, name string, attrs *Attrs) (fs.Node, error)
+}
+
+// parentStatInodeInHopsFS stats name as a child of parent (real or synthetic), dispatching
+// through the concrete type's statInodeInHopsFS so AbsolutePath resolves correctly.
+// Returns ENOENT if parent is nil or does not implement inodeStatter.
+func parentStatInodeInHopsFS(parent Pather, operation, name string, attrs *Attrs) (fs.Node, error) {
+	if parent == nil {
+		return nil, syscall.ENOENT
+	}
+	if statter, ok := parent.(inodeStatter); ok {
+		return statter.statInodeInHopsFS(operation, name, attrs)
+	}
+	return nil, syscall.ENOENT
+}
+
+// syntheticInodeBase places all synthetic inode numbers in [2^62, 2^63), well above
+// any plausible HopsFS backend inode (which grow monotonically from a small base)
+// and within the positive range of a signed 64-bit integer.
+const syntheticInodeBase uint64 = 1 << 62
+
+// syntheticInode returns a deterministic inode number for key (typically a virtual
+// path), placed in the synthetic range so it cannot collide with a backend inode.
+// The same key always maps to the same number across mount sessions and hosts.
 func syntheticInode(key string) uint64 {
 	hasher := fnv.New64a()
 	_, _ = hasher.Write([]byte(key))
-	inode := hasher.Sum64()
-	if inode == 0 {
-		return 1
-	}
-	return inode
+	return syntheticInodeBase | (hasher.Sum64() & (syntheticInodeBase - 1))
 }
 
+// nodeAttrs extracts the cached Attrs from any known inode type.
+// Returns (Attrs{}, false) for unrecognized node types.
 func nodeAttrs(node fs.Node) (Attrs, bool) {
 	switch n := node.(type) {
 	case *DirINode:
@@ -291,6 +205,8 @@ func nodeAttrs(node fs.Node) (Attrs, bool) {
 	}
 }
 
+// nodeAttrsFresh reports whether node's cached attrs are still valid at now.
+// Returns false for unknown node types and for a zero-valued Expires.
 func nodeAttrsFresh(node fs.Node, now time.Time) bool {
 	attrs, ok := nodeAttrs(node)
 	if !ok {

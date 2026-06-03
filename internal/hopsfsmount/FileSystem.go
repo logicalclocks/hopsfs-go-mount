@@ -23,22 +23,22 @@ import (
 )
 
 type FileSystem struct {
-	HdfsAccessors       []HdfsAccessor // Interface to access HDFS
-	hdfsAccessorsIndex  int
-	SrcDir              string   // Src directory that will mounted
-	AllowedPrefixes     []string // List of allowed path prefixes (only those prefixes are exposed via mountpoint)
-	VirtualDirectories  []VirtualDirectoryConfig
-	ReadOnly            bool // Indicates whether mount filesystem with readonly
-	DelaySyncUntilClose bool // If true, ignore sync/flush operations until file close
-	Mounted             bool // True if filesystem is mounted
-	RetryPolicy         *RetryPolicy
-	Clock               Clock  // interface to get wall clock time
-	FsInfo              FsInfo // Usage of HDFS, including capacity, remaining, used sizes.
+	HdfsAccessors       []HdfsAccessor           // Interface to access HDFS
+	hdfsAccessorsIndex  int                      // Round-robin index over HdfsAccessors
+	SrcDir              string                   // Src directory that will mounted
+	AllowedPrefixes     []string                 // List of allowed path prefixes (only those prefixes are exposed via mountpoint)
+	VirtualDirectories  []VirtualDirectoryConfig // Configured virtual directories exposed as synthetic entries at the mount root
+	ReadOnly            bool                     // Indicates whether mount filesystem with readonly
+	DelaySyncUntilClose bool                     // If true, ignore sync/flush operations until file close
+	Mounted             bool                     // True if filesystem is mounted
+	RetryPolicy         *RetryPolicy             // Retry policy for failed backend operations
+	Clock               Clock                    // interface to get wall clock time
+	FsInfo              FsInfo                   // Usage of HDFS, including capacity, remaining, used sizes.
 
-	closeOnUnmount            []io.Closer // list of opened files (zip archives) to be closed on unmount
-	closeOnUnmountLock        sync.Mutex  // mutex to protet closeOnUnmount
-	virtualRootCollisions     map[string]bool
-	virtualRootCollisionsLock sync.RWMutex
+	closeOnUnmount            []io.Closer     // list of opened files (zip archives) to be closed on unmount
+	closeOnUnmountLock        sync.Mutex      // mutex to protect closeOnUnmount
+	virtualRootCollisions     map[string]bool // Configured virtual root names that collide with a real backend entry at the mount root
+	virtualRootCollisionsLock sync.RWMutex    // guards virtualRootCollisions
 }
 
 // Verify that *FileSystem implements necesary FUSE interfaces

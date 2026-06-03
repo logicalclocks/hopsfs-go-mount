@@ -676,7 +676,7 @@ func TestMountSubDir(t *testing.T) {
 			}
 		}
 
-		content := listDir(t, mountPoint)
+		content := listDir(t, rootDir)
 		if len(content) < dirs {
 			t.Errorf("Failed. Expected >= %d, Got %d", dirs, len(content))
 		}
