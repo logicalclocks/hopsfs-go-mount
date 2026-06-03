@@ -75,7 +75,7 @@ func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	flag.StringVar(&ForceOverrideGroupname, "hopsFSGroupName", "", "HopsFS groupname")
 	flag.BoolVar(&UseGroupFromHopsFsDatasetPath, "getGroupFromHopsFSDatasetPath", false, "Get the group from hopsfs dataset path. This will work if a hopsworks project is mounted")
 	flag.BoolVar(&AllowOther, "allowOther", true, "Allow other users to use the filesystem")
-	flag.StringVar(&VirtualDirectoriesSpec, "virtualDirectories", "", "Semicolon-separated virtual directory specs exposed at the mount root, in the form <name>:<backend-root>:<backend-dirs>; for example shared-datasets:/Projects:projectA/datasetA,projectB/datasetB")
+	flag.StringVar(&VirtualDirectoriesSpec, "virtualDirectories", "", "Virtual directory specs exposed at the mount root. Either a semicolon-separated compact form (<name>:<backend-root>:<backend-dirs>;<name>:<backend-root>:<backend-dirs>...) or a JSON array of {name,paths,backendRoot} objects. Example: shared-datasets:/Projects:projectA/datasetA,projectB/datasetB")
 	flag.BoolVar(&Version, "version", false, "Print version")
 	flag.BoolVar(&EnablePageCache, "enablePageCache", false, "Enable Linux Page Cache")
 	flag.BoolVar(&EnableDefaultPermissions, "enableDefaultPermissions", true, "Enable FUSE default_permissions option. If disabled, permissions are not checked by kernel and only checked on server side")
@@ -131,6 +131,10 @@ func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 
 	if StagingCacheMaxDiskUsage < 0.0 || StagingCacheMaxDiskUsage > 0.8 {
 		log.Fatalf("Invalid config. stagingCacheMaxDiskUsage must be between 0.0 and 0.8")
+	}
+
+	if _, err := ParseVirtualDirectoriesSpec(VirtualDirectoriesSpec); err != nil {
+		log.Fatalf("Invalid --virtualDirectories: %v", err)
 	}
 
 	logger.Info(fmt.Sprintf("Staging dir is:%s, Using TLS: %v, RetryAttempts: %d,  LogFile: %s", StagingDir, Tls, retryPolicy.MaxAttempts, LogFile), nil)

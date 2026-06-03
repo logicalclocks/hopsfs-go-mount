@@ -21,7 +21,7 @@ type DirINode struct {
 	baseDirNode
 }
 
-// Verify that *Dir implements necesary FUSE interfaces
+// Verify that *DirINode implements necesary FUSE interfaces
 var _ fs.Node = (*DirINode)(nil)
 var _ fs.HandleReadDirAller = (*DirINode)(nil)
 var _ fs.NodeStringLookuper = (*DirINode)(nil)
@@ -34,6 +34,22 @@ var _ fs.NodeReadlinker = (*DirINode)(nil)
 var _ fs.NodeLinker = (*DirINode)(nil)
 var _ fs.NodeCreater = (*DirINode)(nil)
 var _ fs.NodeFsyncer = (*DirINode)(nil)
+
+// AbsolutePath returns the absolute backend path of this real directory node by
+// walking up the Parent chain. Defined on *DirINode (not the embedded baseDirNode)
+// so that callers from within methods on this type get the correct dispatch when
+// they call dir.AbsolutePath() in operational code.
+func (dir *DirINode) AbsolutePath() string {
+	if dir.Parent == nil {
+		return dir.FileSystem.SrcDir
+	}
+	return path.Join(dir.Parent.AbsolutePath(), dir.Attrs.Name)
+}
+
+// AbsolutePathForChild returns the absolute backend path of a named child.
+func (dir *DirINode) AbsolutePathForChild(name string) string {
+	return path.Join(dir.AbsolutePath(), name)
+}
 
 // Responds on FUSE request to get directory attributes.
 func (dir *DirINode) Attr(ctx context.Context, a *fuse.Attr) error {
@@ -60,6 +76,8 @@ func (dir *DirINode) Lookup(ctx context.Context, name string) (fs.Node, error) {
 	return dir.LookupInt(Lookup, name)
 }
 
+// LookupInt is the unlocked form of Lookup. Callers (Lookup itself, renameInt) must
+// already hold dir.dirMutex.
 func (dir *DirINode) LookupInt(opName string, name string) (fs.Node, error) {
 	if dir.Parent == nil && dir.FileSystem.HasVirtualDirectory() {
 		if node, handled, err := dir.FileSystem.lookupVirtualRoot(dir, opName, name); handled || err != nil {
@@ -123,25 +141,6 @@ func (dir *DirINode) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 		}
 	}
 	return entries, nil
-}
-
-// Performs Stat() query on the backend.
-func (dir *DirINode) statInodeInHopsFS(operation, name string, attrs *Attrs) (fs.Node, error) {
-	a, err := dir.FileSystem.getDFSConnector().Stat(path.Join(dir.AbsolutePath(), name))
-	if err != nil {
-		logger.Info("Stat failed on backend", logger.Fields{Operation: operation, Path: path.Join(dir.AbsolutePath(), name), Error: err})
-		dir.removeChildInode(operation, name)
-		if err == syscall.ENOENT {
-			dir.addNegativeCacheEntry(name)
-		}
-		return nil, err
-	}
-	*attrs = a
-
-	inode := dir.addOrUpdateChildInodeAttrs(operation, name, *attrs)
-	logger.Info("Stat successful on backend", logger.Fields{Operation: operation, Path: path.Join(dir.AbsolutePath(), name), FileSize: attrs.Size,
-		IsDir: attrs.Mode.IsDir(), IsRegular: attrs.Mode.IsRegular()})
-	return inode, nil
 }
 
 // Responds on FUSE Mkdir request.
@@ -259,6 +258,7 @@ func (dir *DirINode) Remove(ctx context.Context, req *fuse.RemoveRequest) error 
 	err := dir.FileSystem.getDFSConnector().Remove(targetPath)
 	if err == nil {
 		dir.removeChildInode(Remove, req.Name)
+		dir.addNegativeCacheEntry(req.Name)
 		if StagingCache != nil {
 			StagingCache.Remove(targetPath)
 		}
@@ -275,61 +275,6 @@ func (srcParent *DirINode) Rename(ctx context.Context, req *fuse.RenameRequest, 
 	defer srcParent.unlockMutex()
 
 	return srcParent.renameInt(Rename, req.OldName, req.NewName, dstParentDir, hdfs.RENAME_OPTION_NONE)
-}
-
-func (srcParent *DirINode) renameInt(operationName, oldName, newName string, dstParentDir fs.Node, options hdfs.RenameOptions) error {
-	oldPath := srcParent.AbsolutePathForChild(oldName)
-	newPath := dstParentDir.(*DirINode).AbsolutePathForChild(newName)
-	logger.Debug("Renaming", logger.Fields{Operation: operationName, From: oldPath, To: newPath})
-
-	srcInode, err := srcParent.LookupInt(Rename, oldName)
-	if err != nil {
-		logger.Error("Rename failed. Src Inode not found", logger.Fields{Operation: operationName, From: oldPath, To: newPath})
-		return err
-	}
-
-	dstInode, err := dstParentDir.(*DirINode).LookupInt(Rename, newName)
-	if err == nil {
-		logger.Debug("Rename. Dst Inode not found", logger.Fields{Operation: operationName, From: oldPath, To: newPath})
-	}
-
-	// update backend
-	err = srcParent.FileSystem.getDFSConnector().Rename2(oldPath, newPath, options)
-	if err != nil {
-		logger.Error("Rename failed at the backend", logger.Fields{Operation: operationName, From: oldPath, To: newPath, Error: err})
-		return err
-	}
-
-	if StagingCache != nil {
-		StagingCache.Rename(oldPath, newPath)
-	}
-
-	if srcInode != nil {
-		srcParent.removeChildInode(Rename, oldName)
-	}
-
-	if dstInode != nil {
-		dstParentDir.(*DirINode).removeChildInode(Rename, newName)
-	}
-
-	dstParentDir.(*DirINode).removeNegativeCacheEntry(newName)
-
-	if fnode, ok := (srcInode).(*FileINode); ok {
-		logger.Trace("Rename src is file", logger.Fields{Operation: operationName, From: oldPath, To: newPath})
-		fnode.Attrs.Name = newName
-		fnode.Parent = dstParentDir.(*DirINode)
-		dstParentDir.(*DirINode).adoptChildInode(Rename, newName, fnode)
-	}
-
-	if dnode, ok := (srcInode).(*DirINode); ok {
-		logger.Trace("Rename src is dir", logger.Fields{Operation: operationName, From: oldPath, To: newPath})
-		dnode.Attrs.Name = newName
-		dnode.Parent = dstParentDir.(*DirINode)
-		dstParentDir.(*DirINode).adoptChildInode(Rename, newName, dnode)
-	}
-
-	logger.Info("Renamed", logger.Fields{Operation: operationName, From: oldPath, To: newPath})
-	return nil
 }
 
 // Responds on FUSE Rename request.
@@ -382,4 +327,167 @@ func (dir *DirINode) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp
 	}
 
 	return nil
+}
+
+// Symlink/Readlink/Link/Fsync are not supported on real directories. They live on the
+// outer type rather than the base so that the log lines carry the correct AbsolutePath.
+
+func (dir *DirINode) Symlink(ctx context.Context, req *fuse.SymlinkRequest) (fs.Node, error) {
+	logger.Error("Unsupported Symlink operation.", logger.Fields{Operation: Symlink, Path: dir.AbsolutePath()})
+	return nil, syscall.ENOTSUP
+}
+
+func (dir *DirINode) Readlink(ctx context.Context, req *fuse.ReadlinkRequest) (string, error) {
+	logger.Error("Unsupported Readlink operation.", logger.Fields{Operation: ReadLink, Path: dir.AbsolutePath()})
+	return "", syscall.ENOTSUP
+}
+
+func (dir *DirINode) Link(ctx context.Context, req *fuse.LinkRequest, old fs.Node) (fs.Node, error) {
+	logger.Error("Unsupported Link operation.", logger.Fields{Operation: Link, Path: dir.AbsolutePath()})
+	return nil, syscall.ENOTSUP
+}
+
+func (dir *DirINode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
+	logger.Info("Fsync called on Dir ", logger.Fields{Operation: Fsync, Path: dir.AbsolutePath()})
+	return nil
+}
+
+// ============================================================================
+// Helpers below — called by the FUSE entry points above.
+// ============================================================================
+
+// renameInt is the shared body for Rename and Rename2; caller must hold srcParent.dirMutex.
+func (srcParent *DirINode) renameInt(operationName, oldName, newName string, dstParentDir fs.Node, options hdfs.RenameOptions) error {
+	// Reject renames whose destination is a synthetic directory. The kernel can route them
+	// here when the source parent is a real *DirINode and the destination is *VirtualDirINode,
+	// which does not accept mutations.
+	dstDir, ok := dstParentDir.(*DirINode)
+	if !ok {
+		logger.Warn("Rename rejected: destination parent is a synthetic directory",
+			logger.Fields{Operation: operationName, Path: srcParent.AbsolutePathForChild(oldName)})
+		return syscall.EPERM
+	}
+
+	// Reject renaming a configured virtual-root name. The name is reserved by configuration;
+	// allowing the rename would either ENOENT against the backend (no real collision) or
+	// silently rename a colliding real entry while leaving the virtual still visible.
+	if srcParent.Parent == nil {
+		if _, isVirtual := srcParent.FileSystem.virtualDirectoryConfigByName(oldName); isVirtual {
+			logger.Warn("Rename rejected: source name is a configured virtual root",
+				logger.Fields{Operation: operationName, Path: srcParent.AbsolutePathForChild(oldName)})
+			return syscall.EPERM
+		}
+	}
+
+	oldPath := srcParent.AbsolutePathForChild(oldName)
+	newPath := dstDir.AbsolutePathForChild(newName)
+	logger.Debug("Renaming", logger.Fields{Operation: operationName, From: oldPath, To: newPath})
+
+	// Inspect local caches only — do not stat the backend before the rename. The backend
+	// validates src existence as part of the rename RPC, and a pre-rename Lookup risks a
+	// false negative if a stale negative-cache entry exists for oldName.
+	srcInode := srcParent.getChildInode(operationName, oldName)
+	dstInode := dstDir.getChildInode(operationName, newName)
+
+	if err := srcParent.FileSystem.getDFSConnector().Rename2(oldPath, newPath, options); err != nil {
+		logger.Error("Rename failed at the backend", logger.Fields{Operation: operationName, From: oldPath, To: newPath, Error: err})
+		return err
+	}
+
+	if StagingCache != nil {
+		StagingCache.Rename(oldPath, newPath)
+	}
+
+	// Source side: oldName no longer exists at srcParent.
+	if srcInode != nil {
+		srcParent.removeChildInode(Rename, oldName)
+	}
+	srcParent.addNegativeCacheEntry(oldName)
+
+	// Destination side: newName now exists at dstDir.
+	if dstInode != nil {
+		dstDir.removeChildInode(Rename, newName)
+	}
+	dstDir.removeNegativeCacheEntry(newName)
+
+	// Re-parent the cached inode if we had one. Type switches fall through silently for
+	// nil srcInode and for *VirtualDirINode (never the src of a real rename — VirtualDirINode.Rename
+	// would have intercepted before reaching this function).
+	if fnode, ok := srcInode.(*FileINode); ok {
+		logger.Trace("Rename src is file", logger.Fields{Operation: operationName, From: oldPath, To: newPath})
+		fnode.Attrs.Name = newName
+		fnode.Parent = dstDir
+		dstDir.adoptChildInode(Rename, newName, fnode)
+	}
+
+	if dnode, ok := srcInode.(*DirINode); ok {
+		logger.Trace("Rename src is dir", logger.Fields{Operation: operationName, From: oldPath, To: newPath})
+		dnode.Attrs.Name = newName
+		dnode.Parent = dstDir
+		dstDir.adoptChildInode(Rename, newName, dnode)
+	}
+
+	logger.Info("Renamed", logger.Fields{Operation: operationName, From: oldPath, To: newPath})
+	return nil
+}
+
+// statInodeInHopsFS performs a backend Stat for a named child and caches the result.
+func (dir *DirINode) statInodeInHopsFS(operation, name string, attrs *Attrs) (fs.Node, error) {
+	a, err := dir.FileSystem.getDFSConnector().Stat(path.Join(dir.AbsolutePath(), name))
+	if err != nil {
+		logger.Info("Stat failed on backend", logger.Fields{Operation: operation, Path: path.Join(dir.AbsolutePath(), name), Error: err})
+		dir.removeChildInode(operation, name)
+		if err == syscall.ENOENT {
+			dir.addNegativeCacheEntry(name)
+		}
+		return nil, err
+	}
+	*attrs = a
+
+	inode := dir.addOrUpdateChildInodeAttrs(operation, name, *attrs)
+	logger.Info("Stat successful on backend", logger.Fields{Operation: operation, Path: path.Join(dir.AbsolutePath(), name), FileSize: attrs.Size,
+		IsDir: attrs.Mode.IsDir(), IsRegular: attrs.Mode.IsRegular()})
+	return inode, nil
+}
+
+// addOrUpdateChildInodeAttrs caches a child inode under name. New children are wired with
+// dir as their Parent so AbsolutePath() walks up through the real-tree type.
+func (dir *DirINode) addOrUpdateChildInodeAttrs(operation, name string, attrs Attrs) fs.Node {
+	dir.lockChildrenMutex()
+	defer dir.unlockChildrenMutex()
+
+	if dir.children == nil {
+		dir.children = make(map[string]fs.Node)
+	}
+
+	shouldBeDir := (attrs.Mode & os.ModeDir) != 0
+	if node, ok := dir.children[name]; ok {
+		if shouldBeDir {
+			if dnode, ok := (node).(*DirINode); ok {
+				dnode.Attrs = attrs
+				logger.Debug("Children's List. addOrUpdateChildInodeAttrs. Update ", logger.Fields{Operation: operation, Child: name, NumChildren: len(dir.children)})
+				return node
+			}
+			node = newDirINode(dir.FileSystem, dir, attrs)
+		} else {
+			if fnode, ok := (node).(*FileINode); ok {
+				fnode.Attrs = attrs
+				logger.Debug("Children's List. addOrUpdateChildInodeAttrs. Update ", logger.Fields{Operation: operation, Child: name, NumChildren: len(dir.children)})
+				return node
+			}
+			node = &FileINode{FileSystem: dir.FileSystem, Parent: dir, Attrs: attrs}
+		}
+		dir.children[name] = node
+		logger.Debug("Children's List. addOrUpdateChildInodeAttrs. Replace ", logger.Fields{Operation: operation, Child: name, NumChildren: len(dir.children)})
+		return node
+	}
+	var node fs.Node
+	if shouldBeDir {
+		node = newDirINode(dir.FileSystem, dir, attrs)
+	} else {
+		node = &FileINode{FileSystem: dir.FileSystem, Parent: dir, Attrs: attrs}
+	}
+	dir.children[name] = node
+	logger.Debug("Children's List. addOrUpdateChildInodeAttrs. Add ", logger.Fields{Operation: operation, Child: name, NumChildren: len(dir.children)})
+	return node
 }
