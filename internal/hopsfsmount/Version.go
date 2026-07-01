@@ -5,7 +5,7 @@ package hopsfsmount
 var (
 	// Add Version tag, manually update
 	// Note: redeploy bin to repo.hops.works
-	VERSION = "3.4.3.2-EE-SANPSHOT"
+	VERSION = "3.4.3.3-EE-SANPSHOT"
 
 	// GITCommit overwritten automatically by the build
 	GITCOMMIT = "HEAD"
