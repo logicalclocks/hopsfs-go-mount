@@ -166,8 +166,8 @@ make test-kubernetes
 ```
 
 `make test-kubernetes` builds and pushes
-`dockerlocal:5000/hopsfs_mount:3.4.3.1-EE-SANPSHOT`, then starts a pod that
-pulls `registry.service.consul:30443/hopsfs_mount:3.4.3.1-EE-SANPSHOT` and
+`dockerlocal:5000/hopsfs_mount:3.4.3.3-EE-SANPSHOT`, then starts a pod that
+pulls `registry.service.consul:30443/hopsfs_mount:3.4.3.3-EE-SANPSHOT` and
 runs the tests inside the cluster using the mounted HopsFS certificates.
 
 To point the integration tests at a different HDFS namenode, set
