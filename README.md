@@ -41,6 +41,10 @@ Options:
         HopsFS username
   -lazy
         Allows to mount HopsFS filesystem before HopsFS is available
+  -namenodeDialTimeout duration
+        Time limit for establishing a connection to the namenode, including the TLS handshake. Negative disables the limit (default 30s)
+  -namenodeTcpUserTimeout duration
+        TCP_USER_TIMEOUT for namenode connections: how long sent data may stay unacknowledged before the connection is declared dead. Catches a namenode whose address vanished without closing the connection. Negative disables it (default 30s)
   -logFile string
         Log file path. By default the log is written to console
   -logLevel string

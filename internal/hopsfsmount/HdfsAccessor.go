@@ -118,6 +118,8 @@ func (dfs *HdfsAccessorImpl) connectToNameNodeImpl() (*hdfs.Client, error) {
 		Addresses: dfs.NameNodeAddresses,
 		TLS:       dfs.TLSConfig.TLS,
 		User:      hadoopUserName,
+		NamenodeDialTimeout:    NameNodeDialTimeout,
+		NamenodeTCPUserTimeout: NameNodeTCPUserTimeout,
 	}
 
 	if dfs.TLSConfig.TLS {
