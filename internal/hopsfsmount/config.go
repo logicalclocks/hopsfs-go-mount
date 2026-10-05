@@ -52,6 +52,8 @@ var StagingCacheMaxDownloadSize int64 = 1 * 1024 * 1024 // 1MB
 var StagingCacheMaxDiskUsage float64 = 0.60
 var StagingCacheDiskUsageCheckInterval time.Duration = 1 * time.Second
 var StagingCacheStatsReportingInterval time.Duration = 0
+var NameNodeDialTimeout time.Duration = 30 * time.Second
+var NameNodeTCPUserTimeout time.Duration = 30 * time.Second
 
 func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	flag.BoolVar(&LazyMount, "lazy", false, "Allows to mount HopsFS filesystem before HopsFS is available")
@@ -71,6 +73,8 @@ func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	flag.StringVar(&MntSrcDir, "srcDir", "/", "HopsFS src directory")
 	flag.StringVar(&LogFile, "logFile", "", "Log file path. By default the log is written to console")
 	flag.IntVar(&Connectors, "numConnections", 1, "Number of connections with the namenode")
+	flag.DurationVar(&NameNodeDialTimeout, "namenodeDialTimeout", 30*time.Second, "Time limit for establishing a connection to the namenode, including the TLS handshake. Negative disables the limit")
+	flag.DurationVar(&NameNodeTCPUserTimeout, "namenodeTcpUserTimeout", 30*time.Second, "TCP_USER_TIMEOUT for namenode connections: how long sent data may stay unacknowledged before the connection is declared dead. Negative disables it")
 	flag.StringVar(&ForceOverrideUsername, "hopsFSUserName", "", "HopsFS username")
 	flag.StringVar(&ForceOverrideGroupname, "hopsFSGroupName", "", "HopsFS groupname")
 	flag.BoolVar(&UseGroupFromHopsFsDatasetPath, "getGroupFromHopsFSDatasetPath", false, "Get the group from hopsfs dataset path. This will work if a hopsworks project is mounted")
