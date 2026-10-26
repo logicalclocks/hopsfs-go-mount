@@ -1059,6 +1059,13 @@ func testNameNodeAddresses() []string {
 
 func withMount(t testing.TB, srcDir string, delaySyncUntilClose bool, fn func(mntPath string, hdfsAccessor HdfsAccessor)) {
 	t.Helper()
+	withMountFS(t, srcDir, delaySyncUntilClose, func(mntPath string, hdfsAccessor HdfsAccessor, _ *FileSystem) {
+		fn(mntPath, hdfsAccessor)
+	})
+}
+
+func withMountFS(t testing.TB, srcDir string, delaySyncUntilClose bool, fn func(mntPath string, hdfsAccessor HdfsAccessor, fileSystem *FileSystem)) {
+	t.Helper()
 
 	// Enable cache for this test
 	if StagingCache == nil {
@@ -1113,7 +1120,7 @@ func withMount(t testing.TB, srcDir string, delaySyncUntilClose bool, fn func(mn
 	//disable polling
 	disablePolling(mnt.Dir)
 
-	fn(mnt.Dir, hdfsAccessor)
+	fn(mnt.Dir, hdfsAccessor, fileSystem)
 }
 
 func mkdir(t testing.TB, dir string) {

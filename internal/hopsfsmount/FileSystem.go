@@ -34,11 +34,14 @@ type FileSystem struct {
 	RetryPolicy         *RetryPolicy             // Retry policy for failed backend operations
 	Clock               Clock                    // interface to get wall clock time
 	FsInfo              FsInfo                   // Usage of HDFS, including capacity, remaining, used sizes.
+	WB                  *WriteBehind             // Write-behind uploads; nil when off
 
 	closeOnUnmount            []io.Closer     // list of opened files (zip archives) to be closed on unmount
 	closeOnUnmountLock        sync.Mutex      // mutex to protect closeOnUnmount
 	virtualRootCollisions     map[string]bool // Configured virtual root names that collide with a real backend entry at the mount root
 	virtualRootCollisionsLock sync.RWMutex    // guards virtualRootCollisions
+	root                      *DirINode       // the root the server walks; the control socket walks the same tree
+	rootOnce                  sync.Once
 }
 
 // Verify that *FileSystem implements necesary FUSE interfaces
@@ -64,6 +67,9 @@ func NewFileSystem(hdfsAccessors []HdfsAccessor, srcDir string, allowedPrefixes 
 	}
 	if err := filesystem.normalizeVirtualDirectoryConfig(); err != nil {
 		return nil, err
+	}
+	if WriteBehindEnabled && !readOnly {
+		filesystem.WB = NewWriteBehind(filesystem)
 	}
 	return filesystem, nil
 }
@@ -105,8 +111,13 @@ func (filesystem *FileSystem) Unmount(mountPoint string) {
 	}
 }
 
-// Returns root directory of the filesystem
+// Returns root directory of the filesystem, the same node on every call
 func (filesystem *FileSystem) Root() (fs.Node, error) {
+	filesystem.rootOnce.Do(func() { filesystem.root = filesystem.newRoot() })
+	return filesystem.root, nil
+}
+
+func (filesystem *FileSystem) newRoot() *DirINode {
 	//get UID and GID for the current user
 	cu, err := user.Current()
 	if err != nil {
@@ -122,7 +133,7 @@ func (filesystem *FileSystem) Root() (fs.Node, error) {
 		Mode:  0755 | os.ModeDir,
 		Mtime: filesystem.Clock.Now(),
 		Ctime: filesystem.Clock.Now(),
-	}), nil
+	})
 }
 
 // Returns if given absoute path allowed by any of the prefixes

@@ -51,6 +51,7 @@ type FileINode struct {
 	dataMutex        sync.Mutex    // mutex for all I/O operations (read/write/truncate/flush) and isDirty flag
 	isDirty          bool          // tracks if file has unflushed writes (protected by dataMutex)
 	pendingDFSWriter HdfsWriter    // Writer from initial create, reused on first flush to avoid redundant Remove+Recreate
+	loadedBase       *Attrs        // write-behind: HopsFS status the staged content was loaded from; set while loading (no writer yet), then under dataMutex
 }
 
 // Verify that *File implements necesary FUSE interfaces
@@ -68,6 +69,11 @@ func (file *FileINode) AbsolutePath() string {
 // Responds to the FUSE file attribute request
 // Lock order: fileMutex (2) → fileHandleMutex (1)
 func (file *FileINode) Attr(ctx context.Context, a *fuse.Attr) error {
+	if wb := file.FileSystem.WB; wb != nil {
+		if err := wb.takeError(file.AbsolutePath()); err != nil {
+			return err
+		}
+	}
 	file.lockFile()
 	defer file.unlockFile()
 
@@ -108,6 +114,14 @@ func (file *FileINode) Open(ctx context.Context, req *fuse.OpenRequest, resp *fu
 	defer file.unlockFile()
 
 	logger.Debug("Opening file", logger.Fields{Operation: Open, Path: file.AbsolutePath(), Flags: req.Flags, FileSize: file.Attrs.Size})
+	if wb := file.FileSystem.WB; wb != nil {
+		if !req.Flags.IsReadOnly() && wb.isFenced() {
+			return nil, syscall.EROFS
+		}
+		if err := wb.takeError(file.AbsolutePath()); err != nil {
+			return nil, err
+		}
+	}
 	handle, err := file.NewFileHandle(true, req.Flags)
 	if err != nil {
 		logger.Error("Opening file failed", logger.Fields{Operation: Open, Path: file.AbsolutePath(), Flags: req.Flags, FileSize: file.Attrs.Size, Error: err})
@@ -152,6 +166,10 @@ func (file *FileINode) RemoveHandle(handle *FileHandle) {
 // Note: pendingDFSWriter is always nil here — it is closed synchronously in
 // flushToDFS() (called from Flush) before Release/closeStaging runs.
 func (file *FileINode) closeStaging() {
+	// A file write-behind has not landed keeps its staged copy: the upload reads it.
+	if wb := file.FileSystem.WB; wb != nil && wb.retain(file.AbsolutePath(), file.isDirty) {
+		return
+	}
 	if file.fileProxy != nil { // if not already closed
 		cached := false
 		// If caching is enabled and this is a LocalRWFileProxy, add to cache
@@ -186,6 +204,18 @@ func (file *FileINode) markDirty() {
 // Flushes file to DFS if dirty
 // Lock order: dataMutex (3) held by caller → fileHandleMutex (1) via flushAttempt
 func (file *FileINode) flushToDFS(operation string) error {
+	if wb := file.FileSystem.WB; wb != nil {
+		if !file.isDirty {
+			return nil
+		}
+		size, err := file.stagedSize()
+		if err != nil {
+			return err
+		}
+		file.isDirty = false
+		_, err = wb.enqueue(file, size)
+		return err
+	}
 	// Check dirty flag (already protected by dataMutex held by caller)
 	if !file.isDirty {
 		// If there's a pending writer from file creation (e.g. touch or empty file),
@@ -338,6 +368,9 @@ func (file *FileINode) flushAttempt(operation string) error {
 // Responds to the FUSE Fsync request
 // Lock order: dataMutex (3) → fileHandleMutex (1) via flushToDFS
 func (file *FileINode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
+	if file.FileSystem.WB != nil {
+		return file.fsyncWriteBehind()
+	}
 	// If delaySyncUntilClose is enabled, skip fsync until file close
 	if file.FileSystem.DelaySyncUntilClose {
 		logger.Debug("Fsync deferred until close", file.logInfo(logger.Fields{Operation: Fsync}))
@@ -350,6 +383,35 @@ func (file *FileINode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error 
 	return file.flushToDFS(Fsync)
 }
 
+// Write-behind fsync: queue the file's dirty content, or retry its failed upload, and wait
+// until that generation landed. delaySyncUntilClose does not apply: fsync is the durability point.
+func (file *FileINode) fsyncWriteBehind() error {
+	wb := file.FileSystem.WB
+	path := file.AbsolutePath()
+	file.lockData()
+	var gen uint64
+	if file.isDirty {
+		size, err := file.stagedSize()
+		if err != nil {
+			file.unlockData()
+			return err
+		}
+		file.isDirty = false
+		if gen, err = wb.enqueue(file, size); err != nil {
+			file.unlockData()
+			return err
+		}
+	} else {
+		var ok bool
+		if gen, ok = wb.fsyncGen(file); !ok {
+			file.unlockData()
+			return nil
+		}
+	}
+	file.unlockData()
+	return wb.await(path, gen)
+}
+
 // Invalidates metadata cache, so next ls or stat gives up-to-date file attributes
 func (file *FileINode) InvalidateMetadataCache() {
 	logger.Debug("InvalidateMetadataCache ", file.logInfo(logger.Fields{}))
@@ -360,6 +422,22 @@ func (file *FileINode) InvalidateMetadataCache() {
 // Lock order: fileHandleMutex (1) alone for size change, fileMutex (2) alone for other attrs
 func (file *FileINode) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
 	logger.Debug("Setattr request received: ", logger.Fields{Operation: Setattr})
+
+	if wb := file.FileSystem.WB; wb != nil {
+		if req.Valid.Size() && wb.isFenced() {
+			return syscall.EROFS
+		}
+		if req.Valid.Mode() || req.Valid.Uid() || req.Valid.Gid() {
+			// HopsFS changes what it has: queue content written and not closed (a new file's
+			// first upload creates it), then wait for it.
+			if err := file.queueIfDirty(); err != nil {
+				return err
+			}
+			if err := wb.settle(file.AbsolutePath()); err != nil {
+				return err
+			}
+		}
+	}
 
 	if req.Valid.Size() {
 		// Take a snapshot of handles and release lock before dispatching
@@ -433,6 +511,10 @@ func (file *FileINode) createStagingFile(operation string, existsInDFS bool) (*o
 	//create staging file
 	absPath := file.AbsolutePath()
 	hdfsAccessor := file.FileSystem.getDFSConnector()
+	if !existsInDFS && file.FileSystem.WB != nil {
+		// Write-behind: HopsFS gets the file at its first upload.
+		return file.newStagingFile(operation, false, nil)
+	}
 	if !existsInDFS { // it  is a new file so create it in the DFS
 		w, err := hdfsAccessor.CreateFileWithGroup(absPath, ComputePermissions(file.Attrs.Mode), false, file.Attrs.DFSGroupName)
 		if err != nil {
@@ -455,16 +537,27 @@ func (file *FileINode) createStagingFile(operation string, existsInDFS bool) (*o
 		if StagingCache != nil {
 			if localFile, ok := StagingCache.Get(absPath, int64(upstreamInfo.Size), upstreamInfo.Mtime); ok {
 				logger.Debug("Using cached staging file", file.logInfo(logger.Fields{Operation: operation}))
+				file.loadedBase = &upstreamInfo
 				return localFile, nil
 			}
 		}
+		return file.newStagingFile(operation, true, &upstreamInfo)
 	}
 
-	return file.newStagingFile(operation, existsInDFS)
+	return file.newStagingFile(operation, existsInDFS, nil)
 }
 
 // newStagingFile creates an unlinked staging file and optionally downloads content from DFS.
-func (file *FileINode) newStagingFile(operation string, download bool) (*os.File, error) {
+// base is the HopsFS status just read for the download; under write-behind a download without
+// one reads it first, so the base never postdates the content.
+func (file *FileINode) newStagingFile(operation string, download bool, base *Attrs) (*os.File, error) {
+	if download && base == nil && file.FileSystem.WB != nil {
+		a, err := file.FileSystem.getDFSConnector().Stat(file.AbsolutePath())
+		if err != nil {
+			return nil, err
+		}
+		base = &a
+	}
 	stagingFile, err := os.CreateTemp(StagingDir, "stage")
 	if err != nil {
 		logger.Error("Failed to create staging file", file.logInfo(logger.Fields{Operation: operation, Error: err}))
@@ -474,6 +567,7 @@ func (file *FileINode) newStagingFile(operation string, download bool) (*os.File
 	os.Remove(stagingFile.Name())
 
 	if download {
+		file.loadedBase = base
 		if err := file.downloadToStaging(stagingFile, operation); err != nil {
 			stagingFile.Close()
 			return nil, err

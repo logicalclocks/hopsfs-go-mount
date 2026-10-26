@@ -45,10 +45,16 @@ func (fh *FileHandle) Truncate(size int64) error {
 	fh.File.lockData()
 	defer fh.File.unlockData()
 
-	// as an optimization the file is initially opened in readonly mode
+	// as an optimization the file is initially opened in readonly mode. The upgrade only loads
+	// the content, and sets the base admit registers.
 	err := fh.File.upgradeHandleForWriting(fh, Truncate)
 	if err != nil {
 		return err
+	}
+	if wb := fh.File.FileSystem.WB; wb != nil {
+		if err := wb.admit(fh.File); err != nil {
+			return err
+		}
 	}
 
 	sizeChanged, err := fh.File.fileProxy.Truncate(size)
@@ -103,11 +109,24 @@ func (fh *FileHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fus
 // Responds to FUSE Write request
 // Lock order: dataMutex (3) → fileHandleMutex (1) via upgradeHandleForWriting
 func (fh *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.WriteResponse) error {
+	if wb := fh.File.FileSystem.WB; wb != nil {
+		if err := wb.takeError(fh.File.AbsolutePath()); err != nil {
+			return err
+		}
+	}
 	fh.File.lockData()
 	defer fh.File.unlockData()
 
-	// as an optimization the file is initially opened in readonly mode
-	fh.File.upgradeHandleForWriting(fh, Write)
+	// as an optimization the file is initially opened in readonly mode. The upgrade only loads
+	// the content, and sets the base admit registers.
+	if err := fh.File.upgradeHandleForWriting(fh, Write); err != nil {
+		return err
+	}
+	if wb := fh.File.FileSystem.WB; wb != nil {
+		if err := wb.admit(fh.File); err != nil {
+			return err
+		}
+	}
 
 	nw, err := fh.File.fileProxy.WriteAt(req.Data, req.Offset)
 	resp.Size = nw
@@ -141,6 +160,9 @@ func (fh *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 // Responds to the FUSE Fsync request
 // Lock order: dataMutex (3) → fileHandleMutex (1) via flushToDFS
 func (fh *FileHandle) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
+	if fh.File.FileSystem.WB != nil {
+		return fh.File.fsyncWriteBehind()
+	}
 	// If delaySyncUntilClose is enabled, skip fsync until file close
 	if fh.File.FileSystem.DelaySyncUntilClose {
 		logger.Debug("Fsync deferred until close", fh.logInfo(logger.Fields{Operation: Fsync}))

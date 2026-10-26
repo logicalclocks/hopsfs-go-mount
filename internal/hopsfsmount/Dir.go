@@ -120,16 +120,32 @@ func (dir *DirINode) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 		return nil, err
 	}
 
+	wb := dir.FileSystem.WB
 	entries := make([]fuse.Dirent, 0, len(allAttrs))
+	listed := make(map[string]bool, len(allAttrs))
 	for _, a := range allAttrs {
+		if wb != nil && isWBTemp(a.Name) {
+			continue
+		}
 		if dir.FileSystem.IsPathAllowed(dir.AbsolutePathForChild(a.Name)) {
 			entries = append(entries, fuse.Dirent{
 				Inode: a.Inode,
 				Name:  a.Name,
 				Type:  a.FuseNodeType(),
 			})
-			// Speculatively pre-create a child node with cached attributes.
-			dir.addOrUpdateChildInodeAttrs(ReadDir, a.Name, a)
+			listed[a.Name] = true
+			// Speculatively pre-create a child node with cached attributes. A file write-behind
+			// has not landed keeps its local attributes.
+			if wb == nil || !wb.pending(dir.AbsolutePathForChild(a.Name)) {
+				dir.addOrUpdateChildInodeAttrs(ReadDir, a.Name, a)
+			}
+		}
+	}
+	if wb != nil {
+		for _, e := range wb.newChildren(absolutePath) {
+			if name := path.Base(e.path); !listed[name] {
+				entries = append(entries, fuse.Dirent{Name: name, Type: fuse.DT_File})
+			}
 		}
 	}
 
@@ -191,6 +207,9 @@ func (dir *DirINode) Create(ctx context.Context, req *fuse.CreateRequest, resp *
 	dir.lockMutex()
 	defer dir.unlockMutex()
 
+	if wb := dir.FileSystem.WB; wb != nil && wb.isFenced() {
+		return nil, nil, syscall.EROFS
+	}
 	req.Mode = ComputePermissions(req.Mode)
 	targetPath := dir.AbsolutePathForChild(req.Name)
 	logger.Info("Creating a new file", logger.Fields{Operation: Create, Path: targetPath, Mode: req.Mode, Flags: req.Flags})
@@ -237,6 +256,29 @@ func (dir *DirINode) Create(ctx context.Context, req *fuse.CreateRequest, resp *
 		Group:     groupName,
 	})
 
+	if wb := dir.FileSystem.WB; wb != nil {
+		// Write-behind: HopsFS gets the file at its first upload; until then its attributes are local.
+		now := dir.FileSystem.Clock.Now()
+		file.Attrs.Mtime, file.Attrs.Ctime = now, now
+		file.lockData()
+		file.loadedBase = nil
+		err := wb.created(file)
+		if err == nil {
+			file.isDirty = true // an empty file is uploaded at close too
+		}
+		file.unlockData()
+		if err != nil {
+			// Fenced by a stop since the check above: nothing of this file was let in.
+			file.RemoveHandle(handle)
+			if StagingCache != nil {
+				StagingCache.Remove(targetPath)
+			}
+			dir.removeChildInode(Create, req.Name)
+			return nil, nil, err
+		}
+		return file, handle, nil
+	}
+
 	// update the attributes of the file now.
 	_, err = dir.statInodeInHopsFS(Create, file.Attrs.Name, &file.Attrs)
 	if err != nil {
@@ -255,6 +297,11 @@ func (dir *DirINode) Remove(ctx context.Context, req *fuse.RemoveRequest) error 
 	targetPath := dir.AbsolutePathForChild(req.Name)
 
 	logger.Debug("Removing path", logger.Fields{Operation: Remove, Path: targetPath})
+	if wb := dir.FileSystem.WB; wb != nil {
+		if handled, err := dir.removeWriteBehind(req.Name, targetPath); handled {
+			return err
+		}
+	}
 	err := dir.FileSystem.getDFSConnector().Remove(targetPath)
 	if err == nil {
 		dir.removeChildInode(Remove, req.Name)
@@ -349,6 +396,10 @@ func (dir *DirINode) Link(ctx context.Context, req *fuse.LinkRequest, old fs.Nod
 
 func (dir *DirINode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
 	logger.Info("Fsync called on Dir ", logger.Fields{Operation: Fsync, Path: dir.AbsolutePath()})
+	if wb := dir.FileSystem.WB; wb != nil {
+		// The directory's pending files land, or their errors come back.
+		return wb.settle(dir.AbsolutePath())
+	}
 	return nil
 }
 
@@ -389,6 +440,26 @@ func (srcParent *DirINode) renameInt(operationName, oldName, newName string, dst
 	srcInode := srcParent.getChildInode(operationName, oldName)
 	dstInode := dstDir.getChildInode(operationName, newName)
 
+	wb := srcParent.FileSystem.WB
+	if wb != nil {
+		// HopsFS renames what it has: queue a file written and not closed, then wait for both
+		// sides' uploads, so the rename moves current content.
+		if err := wb.takeError(oldPath); err != nil {
+			return err
+		}
+		if fnode, ok := srcInode.(*FileINode); ok {
+			if err := fnode.queueIfDirty(); err != nil {
+				return err
+			}
+		}
+		if err := wb.settle(oldPath); err != nil {
+			return err
+		}
+		if err := wb.settle(newPath); err != nil {
+			return err
+		}
+	}
+
 	if err := srcParent.FileSystem.getDFSConnector().Rename2(oldPath, newPath, options); err != nil {
 		logger.Error("Rename failed at the backend", logger.Fields{Operation: operationName, From: oldPath, To: newPath, Error: err})
 		return err
@@ -396,6 +467,9 @@ func (srcParent *DirINode) renameInt(operationName, oldName, newName string, dst
 
 	if StagingCache != nil {
 		StagingCache.Rename(oldPath, newPath)
+	}
+	if wb != nil {
+		wb.renamed(oldPath, newPath)
 	}
 
 	// Source side: oldName no longer exists at srcParent.
@@ -429,6 +503,25 @@ func (srcParent *DirINode) renameInt(operationName, oldName, newName string, dst
 
 	logger.Info("Renamed", logger.Fields{Operation: operationName, From: oldPath, To: newPath})
 	return nil
+}
+
+// removeWriteBehind unlinks a path write-behind knows. A file HopsFS never had (created here,
+// not landed yet) is dropped locally with no HopsFS call. Otherwise its upload settles first and
+// the HopsFS remove runs as usual (handled false). Caller holds dir.dirMutex.
+func (dir *DirINode) removeWriteBehind(name, targetPath string) (bool, error) {
+	wb := dir.FileSystem.WB
+	if wb.cancelNew(targetPath) {
+		dir.removeChildInode(Remove, name)
+		dir.addNegativeCacheEntry(name)
+		logger.Info("Removed a file HopsFS never had", logger.Fields{Operation: Remove, Path: targetPath})
+		return true, nil
+	}
+	if err := wb.settle(targetPath); err != nil && err != syscall.EIO {
+		return true, err
+	}
+	// Unlinking a failed or conflicted file discards it: the unlink decides.
+	wb.unlinked(targetPath)
+	return false, nil
 }
 
 // statInodeInHopsFS performs a backend Stat for a named child and caches the result.

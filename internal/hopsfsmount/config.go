@@ -54,6 +54,14 @@ var StagingCacheDiskUsageCheckInterval time.Duration = 1 * time.Second
 var StagingCacheStatsReportingInterval time.Duration = 0
 var NameNodeDialTimeout time.Duration = 30 * time.Second
 var NameNodeTCPUserTimeout time.Duration = 30 * time.Second
+var WriteBehindEnabled bool = false
+var WriteBehindWorkers int = 8
+var WriteBehindMaxFiles int = 1024
+var WriteBehindMaxBytes int64 = 256 * 1024 * 1024
+var WriteBehindWait time.Duration = 30 * time.Second
+var WriteBehindTempTag string = ""
+var ControlSocket string = ""
+var StopDrainTimeout time.Duration = 20 * time.Second
 
 func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	flag.BoolVar(&LazyMount, "lazy", false, "Allows to mount HopsFS filesystem before HopsFS is available")
@@ -75,6 +83,14 @@ func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	flag.IntVar(&Connectors, "numConnections", 1, "Number of connections with the namenode")
 	flag.DurationVar(&NameNodeDialTimeout, "namenodeDialTimeout", 30*time.Second, "Time limit for establishing a connection to the namenode, including the TLS handshake. Negative disables the limit")
 	flag.DurationVar(&NameNodeTCPUserTimeout, "namenodeTcpUserTimeout", 30*time.Second, "TCP_USER_TIMEOUT for namenode connections: how long sent data may stay unacknowledged before the connection is declared dead. Negative disables it")
+	flag.BoolVar(&WriteBehindEnabled, "writeBehind", false, "close returns once a file is staged; workers upload it. fsync waits for the upload")
+	flag.IntVar(&WriteBehindWorkers, "writeBehindWorkers", 8, "write-behind: uploads running at once")
+	flag.IntVar(&WriteBehindMaxFiles, "writeBehindMaxFiles", 1024, "write-behind: files queued, uploading or failed at most")
+	flag.Int64Var(&WriteBehindMaxBytes, "writeBehindMaxBytes", 256*1024*1024, "write-behind: staged bytes queued, uploading or failed at most")
+	flag.DurationVar(&WriteBehindWait, "writeBehindWait", 30*time.Second, "write-behind: how long a close waits for room in the queue before it fails with EIO, its bytes kept staged")
+	flag.StringVar(&WriteBehindTempTag, "writeBehindTempTag", "", "write-behind: tag of this mount's upload temps (.<name>.hopsfs-<tag>); default the host name")
+	flag.StringVar(&ControlSocket, "controlSocket", "", "unix socket for drain, stop and discard (write-behind)")
+	flag.DurationVar(&StopDrainTimeout, "stopDrainTimeout", 20*time.Second, "write-behind: how long a stop (SIGTERM, or stop on the control socket) waits for uploads")
 	flag.StringVar(&ForceOverrideUsername, "hopsFSUserName", "", "HopsFS username")
 	flag.StringVar(&ForceOverrideGroupname, "hopsFSGroupName", "", "HopsFS groupname")
 	flag.BoolVar(&UseGroupFromHopsFsDatasetPath, "getGroupFromHopsFSDatasetPath", false, "Get the group from hopsfs dataset path. This will work if a hopsworks project is mounted")

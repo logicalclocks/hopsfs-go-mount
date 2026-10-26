@@ -571,6 +571,7 @@ func (c *StagingFileCache) GetOrLoad(file *FileINode, hdfsAccessor HdfsAccessor,
 		file.Attrs.Mtime = upstreamInfo.Mtime
 
 		if cachedFile, ok := c.Get(absPath, int64(upstreamInfo.Size), upstreamInfo.Mtime); ok {
+			file.loadedBase = &upstreamInfo
 			return cachedFile, nil
 		}
 	} else {
@@ -589,6 +590,6 @@ func (c *StagingFileCache) GetOrLoad(file *FileINode, hdfsAccessor HdfsAccessor,
 	}
 
 	// Download to staging file
-	stagingFile, err := file.newStagingFile(operation, true)
+	stagingFile, err := file.newStagingFile(operation, true, nil)
 	return stagingFile, err
 }
