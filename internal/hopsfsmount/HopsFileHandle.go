@@ -106,8 +106,13 @@ func (fh *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *f
 	fh.File.lockData()
 	defer fh.File.unlockData()
 
-	// as an optimization the file is initially opened in readonly mode
-	fh.File.upgradeHandleForWriting(fh, Write)
+	// as an optimization the file is initially opened in readonly mode. A
+	// failed upgrade leaves the read only proxy, whose WriteAt is fatal, so
+	// its error must go back to the caller instead of into WriteAt.
+	if err := fh.File.upgradeHandleForWriting(fh, Write); err != nil {
+		logger.Error("Failed to upgrade file handle for writing", fh.logInfo(logger.Fields{Operation: Write, Error: err}))
+		return err
+	}
 
 	nw, err := fh.File.fileProxy.WriteAt(req.Data, req.Offset)
 	resp.Size = nw

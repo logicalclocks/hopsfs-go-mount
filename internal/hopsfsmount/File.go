@@ -444,11 +444,14 @@ func (file *FileINode) createStagingFile(operation string, existsInDFS bool) (*o
 		file.pendingDFSWriter = w
 		logger.Info("Created file in DFS with group (writer kept open)", file.logInfo(logger.Fields{Operation: operation, Group: file.Attrs.DFSGroupName}))
 	} else {
-		// Request to write to existing file - stat to verify it exists and get metadata
+		// Request to write to existing file - stat to verify it exists and get metadata.
+		// The error is passed through: only a backend "not found" is ENOENT, a
+		// NameNode or connection failure stays EIO, so the application does not
+		// take a transient failure for a missing file.
 		upstreamInfo, err := hdfsAccessor.Stat(absPath)
 		if err != nil {
 			logger.Error("Failed to stat file in DFS", file.logInfo(logger.Fields{Operation: operation, Error: err}))
-			return nil, syscall.ENOENT
+			return nil, err
 		}
 
 		// Check if we have a valid cached staging file for this path
@@ -498,6 +501,7 @@ func (file *FileINode) downloadToStaging(stagingFile *os.File, operation string)
 		logger.Error("Failed to open file in DFS", file.logInfo(logger.Fields{Operation: operation, Error: err}))
 		return err
 	}
+	defer reader.Close()
 
 	nc, err := io.Copy(stagingFile, reader)
 	if err != nil {
@@ -506,7 +510,6 @@ func (file *FileINode) downloadToStaging(stagingFile *os.File, operation string)
 			file.logInfo(logger.Fields{Operation: operation, Error: err}))
 		return err
 	}
-	reader.Close()
 	logger.Info(
 		fmt.Sprintf("Downloaded a copy to staging dir. %d bytes copied", nc),
 		file.logInfo(logger.Fields{Operation: operation}))
@@ -610,18 +613,22 @@ func (file *FileINode) upgradeHandleForWriting(me *FileHandle, operation string)
 		// that the caller (Write/Truncate) already holds
 
 		remoteROFileProxy, _ := file.fileProxy.(*RemoteROFileProxy)
-		remoteROFileProxy.hdfsReader.Close() // close this read only handle
-		file.fileProxy = nil
-
 		if err := file.checkDiskSpace(); err != nil {
 			return err
 		}
 
+		// createStagingFile does nothing while the file has a proxy. The read
+		// only one is shared by every handle of the file, so it is put back if
+		// the staging copy cannot be made: the file stays readable and a later
+		// write tries the switch again.
+		file.fileProxy = nil
 		stagingFile, err := file.createStagingFile("Open", true)
 		if err != nil {
+			file.fileProxy = remoteROFileProxy
 			return err
 		}
 
+		remoteROFileProxy.hdfsReader.Close() // close this read only handle
 		file.fileProxy = &LocalRWFileProxy{localFile: stagingFile, file: file}
 		logger.Info("Open handle upgrade to support RW ", file.logInfo(logger.Fields{Operation: operation}))
 		return nil

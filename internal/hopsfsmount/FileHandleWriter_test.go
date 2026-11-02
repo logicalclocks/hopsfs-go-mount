@@ -6,6 +6,7 @@ package hopsfsmount
 import (
 	"io"
 	"os"
+	"syscall"
 	"testing"
 
 	"bazil.org/fuse"
@@ -124,6 +125,87 @@ func TestFaultTolerantWriteFile(t *testing.T) {
 	// Test for closing file
 	err = writeHandle.Release(nil, nil)
 	assert.Nil(t, err)
+}
+
+// openExistingFileReadOnly opens a file the backend has, with 5 bytes. The
+// mount opens it read-only and switches the handle to a staging copy on the
+// first write or truncate, which stats the file again.
+func openExistingFileReadOnly(t *testing.T, name string) (*FileHandle, *MockHdfsAccessor, *MockReadSeekCloserWithPseudoRandomContent) {
+	// With the staging cache on, the open itself downloads a staging copy and
+	// there is no switch to test.
+	originalCache := StagingCache
+	t.Cleanup(func() { StagingCache = originalCache })
+	StagingCache = nil
+
+	mockCtrl := gomock.NewController(t)
+	mockClock := &MockClock{}
+	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
+	hdfsAccessor.EXPECT().IsAvailable().Return(true).AnyTimes()
+	fs, _ := NewFileSystem([]HdfsAccessor{hdfsAccessor}, "/", []string{"*"}, false, DelaySyncUntilClose, NewDefaultRetryPolicy(mockClock), mockClock)
+	root, _ := fs.Root()
+	file := root.(*DirINode).addOrUpdateChildInodeAttrs("unit_test", name, Attrs{Name: name, Mode: os.FileMode(0644)}).(*FileINode)
+
+	reader := &MockReadSeekCloserWithPseudoRandomContent{FileSize: 5, ReaderStats: &ReaderStats{}}
+	hdfsAccessor.EXPECT().OpenRead("/"+name).Return(reader, nil)
+	h, err := file.Open(nil, &fuse.OpenRequest{Flags: fuse.OpenReadWrite}, &fuse.OpenResponse{})
+	assert.Nil(t, err)
+	return h.(*FileHandle), hdfsAccessor, reader
+}
+
+// A NameNode or connection failure during the switch to a staging copy must
+// reach the application as that failure: ENOENT would tell it that the file
+// it holds open does not exist. The read only proxy, shared by every handle of
+// the file, must survive the failure.
+func TestTruncateReturnsTheErrorOfAFailedSwitchToStaging(t *testing.T) {
+	fileHandle, hdfsAccessor, reader := openExistingFileReadOnly(t, "existing")
+
+	hdfsAccessor.EXPECT().Stat("/existing").Return(Attrs{}, syscall.EIO)
+	assert.Equal(t, syscall.EIO, fileHandle.Truncate(0))
+
+	assert.False(t, reader.IsClosed)
+	resp := &fuse.ReadResponse{Data: make([]byte, 5)}
+	assert.NotPanics(t, func() {
+		assert.Nil(t, fileHandle.Read(nil, &fuse.ReadRequest{Size: 5}, resp))
+	})
+	assert.Equal(t, 5, len(resp.Data))
+}
+
+// The write after a failed switch tries the switch again.
+func TestWriteReturnsTheErrorOfAFailedSwitchToStaging(t *testing.T) {
+	fileHandle, hdfsAccessor, reader := openExistingFileReadOnly(t, "existing")
+	write := func() error {
+		var err error
+		assert.NotPanics(t, func() {
+			err = fileHandle.Write(nil, &fuse.WriteRequest{Data: []byte("hello world"), Offset: int64(0)}, &fuse.WriteResponse{})
+		})
+		return err
+	}
+
+	hdfsAccessor.EXPECT().Stat("/existing").Return(Attrs{}, syscall.EIO)
+	assert.Equal(t, syscall.EIO, write())
+	assert.False(t, reader.IsClosed)
+
+	hdfsAccessor.EXPECT().Stat("/existing").Return(Attrs{Name: "existing", Mode: os.FileMode(0644), Size: 5}, nil)
+	hdfsAccessor.EXPECT().OpenRead("/existing").Return(&MockReadSeekCloserWithPseudoRandomContent{FileSize: 5, ReaderStats: &ReaderStats{}}, nil)
+	assert.Nil(t, write())
+	assert.True(t, reader.IsClosed)
+	_, staged := fileHandle.File.fileProxy.(*LocalRWFileProxy)
+	assert.True(t, staged)
+}
+
+// A download of the staging copy that fails partway is a failed switch too,
+// and must close the DFS reader it opened.
+func TestWriteClosesTheReaderOfAFailedDownloadToStaging(t *testing.T) {
+	fileHandle, hdfsAccessor, reader := openExistingFileReadOnly(t, "existing")
+	download := NewMockReadSeekCloser(gomock.NewController(t))
+	download.EXPECT().Read(gomock.Any()).Return(0, syscall.EIO)
+	download.EXPECT().Close().Return(nil)
+	hdfsAccessor.EXPECT().Stat("/existing").Return(Attrs{Name: "existing", Mode: os.FileMode(0644), Size: 5}, nil)
+	hdfsAccessor.EXPECT().OpenRead("/existing").Return(download, nil)
+
+	err := fileHandle.Write(nil, &fuse.WriteRequest{Data: []byte("hello world"), Offset: int64(0)}, &fuse.WriteResponse{})
+	assert.Equal(t, syscall.EIO, err)
+	assert.False(t, reader.IsClosed)
 }
 
 func TestFlushFile(t *testing.T) {
