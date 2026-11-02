@@ -191,6 +191,69 @@ func TestNegativeCacheInvalidatedByCreate(t *testing.T) {
 	assert.NotNil(t, node)
 }
 
+// The kernel sends CREATE for a name its last lookup said was absent: this
+// mount's negative cache, or another client created the file since. Without
+// O_EXCL the open must succeed, but with the kernel's permission check on the
+// file, which it never makes for a CREATE. ESTALE sends the kernel back to a
+// fresh lookup, which must now find the file, and to an OPEN of it.
+func TestCreateOfAnExistingFileSendsTheKernelBackToLookItUp(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	mockClock := &MockClock{}
+	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
+	hdfsAccessor.EXPECT().IsAvailable().Return(true).AnyTimes()
+	fs, _ := NewFileSystem([]HdfsAccessor{hdfsAccessor}, "/", []string{"*"}, false, DelaySyncUntilClose, NewDefaultRetryPolicy(mockClock), mockClock)
+	root, _ := fs.Root()
+
+	// The lookup that told the kernel the name was absent.
+	hdfsAccessor.EXPECT().Stat("/existing").Return(Attrs{}, syscall.ENOENT)
+	_, err := root.(*DirINode).Lookup(nil, "existing")
+	assert.Equal(t, syscall.ENOENT, err)
+
+	hdfsAccessor.EXPECT().CreateFileWithGroup("/existing", gomock.Any(), false, gomock.Any()).Return(nil, syscall.EEXIST).Times(2)
+	_, _, err = root.(*DirINode).Create(nil, &fuse.CreateRequest{Name: "existing",
+		Flags: fuse.OpenReadWrite | fuse.OpenCreate | fuse.OpenExclusive, Mode: os.FileMode(0644)}, &fuse.CreateResponse{})
+	assert.Equal(t, syscall.EEXIST, err)
+
+	_, _, err = root.(*DirINode).Create(nil, &fuse.CreateRequest{Name: "existing",
+		Flags: fuse.OpenReadWrite | fuse.OpenCreate | fuse.OpenTruncate, Mode: os.FileMode(0644)}, &fuse.CreateResponse{})
+	assert.Equal(t, syscall.ESTALE, err)
+
+	// The kernel's retried lookup reaches the backend, not the negative cache.
+	hdfsAccessor.EXPECT().Stat("/existing").Return(Attrs{Name: "existing", Mode: os.FileMode(0444), Size: 5}, nil)
+	node, err := root.(*DirINode).Lookup(nil, "existing")
+	assert.Nil(t, err)
+	if assert.NotNil(t, node) {
+		assert.Equal(t, 0, node.(*FileINode).countActiveHandles())
+	}
+}
+
+// A new file's DFS writer holds the file's lease and only Flush closes it,
+// which never comes for a failed CREATE.
+func TestCreateOfANewFileClosesItsWriterWhenTheFinalStatFails(t *testing.T) {
+	originalCache := StagingCache
+	t.Cleanup(func() { StagingCache = originalCache })
+	StagingCache = nil
+
+	mockCtrl := gomock.NewController(t)
+	mockClock := &MockClock{}
+	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
+	hdfsAccessor.EXPECT().IsAvailable().Return(true).AnyTimes()
+	fs, _ := NewFileSystem([]HdfsAccessor{hdfsAccessor}, "/", []string{"*"}, false, DelaySyncUntilClose, NewDefaultRetryPolicy(mockClock), mockClock)
+	root, _ := fs.Root()
+	file := root.(*DirINode).addOrUpdateChildInodeAttrs("unit_test", "newfile", Attrs{Name: "newfile", Mode: os.FileMode(0644)}).(*FileINode)
+
+	hdfswriter := NewMockHdfsWriter(mockCtrl)
+	hdfswriter.EXPECT().Close().Return(nil)
+	hdfsAccessor.EXPECT().CreateFileWithGroup("/newfile", gomock.Any(), false, gomock.Any()).Return(hdfswriter, nil)
+	hdfsAccessor.EXPECT().Stat("/newfile").Return(Attrs{}, syscall.EIO)
+
+	_, _, err := root.(*DirINode).Create(nil, &fuse.CreateRequest{Name: "newfile",
+		Flags: fuse.OpenReadWrite | fuse.OpenCreate, Mode: os.FileMode(0644)}, &fuse.CreateResponse{})
+	assert.Equal(t, syscall.EIO, err)
+	assert.Equal(t, 0, file.countActiveHandles())
+	assert.Nil(t, file.pendingDFSWriter)
+}
+
 // Testing that Mkdir invalidates negative cache
 func TestNegativeCacheInvalidatedByMkdir(t *testing.T) {
 	mockCtrl := gomock.NewController(t)

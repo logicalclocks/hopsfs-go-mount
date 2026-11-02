@@ -176,6 +176,22 @@ func (fh *FileHandle) Release(_ context.Context, _ *fuse.ReleaseRequest) error {
 	return nil
 }
 
+// abandon closes a handle the kernel never received, after a failed CREATE,
+// for which neither FLUSH nor RELEASE will come. A new file's DFS writer is
+// closed here too, since only Flush closes it otherwise and it holds the
+// file's lease.
+func (fh *FileHandle) abandon(ctx context.Context) {
+	fh.File.lockData()
+	if w := fh.File.pendingDFSWriter; w != nil {
+		fh.File.pendingDFSWriter = nil
+		if err := w.Close(); err != nil {
+			logger.Error("Failed to close the DFS writer of a failed create", fh.logInfo(logger.Fields{Operation: Create, Error: err}))
+		}
+	}
+	fh.File.unlockData()
+	fh.Release(ctx, nil)
+}
+
 func (fh *FileHandle) Poll(ctx context.Context, req *fuse.PollRequest, resp *fuse.PollResponse) error {
 	logger.Warn("Polling is not supported ", fh.logInfo(logger.Fields{Operation: Poll}))
 	return syscall.ENOSYS

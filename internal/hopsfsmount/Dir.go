@@ -223,8 +223,28 @@ func (dir *DirINode) Create(ctx context.Context, req *fuse.CreateRequest, resp *
 	dir.removeNegativeCacheEntry(req.Name)
 	file := (dir.addOrUpdateChildInodeAttrs(Create, req.Name, newFileAttrs)).(*FileINode)
 	handle, err := file.NewFileHandle(false, req.Flags)
+	if err == syscall.EEXIST && req.Flags&fuse.OpenExclusive == 0 {
+		// The kernel sends CREATE when the lookup before it said the name was
+		// absent: this mount's negative cache, or another client created the
+		// file since. Without O_EXCL, open(2) on an existing file succeeds,
+		// but through the kernel's permission check on the file, which a
+		// CREATE never gets (the kernel checked the directory only). ESTALE
+		// makes the kernel look the path up again, with the name gone from
+		// the negative cache now, and open the file it finds as an OPEN.
+		logger.Info("Create of an existing file, sending the kernel back to look it up", logger.Fields{Operation: Create, Path: targetPath, Flags: req.Flags})
+		dir.removeChildInode(Create, req.Name)
+		return nil, nil, syscall.ESTALE
+	}
+	if err == nil {
+		// update the attributes of the file now.
+		_, err = dir.statInodeInHopsFS(Create, file.Attrs.Name, &file.Attrs)
+	}
 	if err != nil {
 		logger.Error("File creation failed", logger.Fields{Operation: Create, Path: targetPath, Mode: req.Mode, Flags: req.Flags, Error: err})
+		// NewFileHandle registered the handle, which the kernel never receives.
+		if handle != nil {
+			handle.abandon(ctx)
+		}
 		dir.removeChildInode(Create, req.Name)
 		return nil, nil, err
 	}
@@ -236,13 +256,6 @@ func (dir *DirINode) Create(ctx context.Context, req *fuse.CreateRequest, resp *
 		User:      userName,
 		Group:     groupName,
 	})
-
-	// update the attributes of the file now.
-	_, err = dir.statInodeInHopsFS(Create, file.Attrs.Name, &file.Attrs)
-	if err != nil {
-		dir.removeChildInode(Create, req.Name)
-		return nil, nil, err
-	}
 
 	return file, handle, nil
 }
