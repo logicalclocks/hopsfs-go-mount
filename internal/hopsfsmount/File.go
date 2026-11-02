@@ -93,6 +93,11 @@ func (file *FileINode) Attr(ctx context.Context, a *fuse.Attr) error {
 	if file.FileSystem.Clock.Now().After(file.Attrs.Expires) {
 		_, err := parentStatInodeInHopsFS(file.Parent, GetattrFile, file.Attrs.Name, &file.Attrs)
 		if err != nil {
+			if err == syscall.ENOENT {
+				// A file this mount knew has gone from the backend: the one
+				// ENOENT on a known file, so it is logged at the default level.
+				logger.Warn("Known file not found on backend", logger.Fields{Operation: GetattrFile, Path: file.AbsolutePath(), Error: err})
+			}
 			return err
 		}
 	} else {
