@@ -6,6 +6,7 @@ package hopsfsmount
 import (
 	"errors"
 	"os"
+	"syscall"
 	"testing"
 	"time"
 
@@ -66,6 +67,32 @@ func TestReadDirWithRetries(t *testing.T) {
 	result, err = ftHdfsAccessor.ReadDir("/test/dir")
 	assert.Nil(t, err)
 	assert.Equal(t, 10, len(result))
+}
+
+// A subtree lock is the namenode's answer over a healthy connection: the retry
+// keeps the client, and with it the readers sharing its connection. The mock
+// refuses any call not expected, so a Close here fails the test.
+func TestStatRetriesASubtreeLockWithoutReconnecting(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
+	hdfsAccessor.EXPECT().IsAvailable().Return(true).AnyTimes()
+	ftHdfsAccessor := NewFaultTolerantHdfsAccessor(hdfsAccessor, atMost2Attempts())
+	hdfsAccessor.EXPECT().Stat("/test/file").Return(Attrs{}, syscall.EBUSY)
+	hdfsAccessor.EXPECT().Stat("/test/file").Return(Attrs{Name: "file"}, nil)
+	attrs, err := ftHdfsAccessor.Stat("/test/file")
+	assert.Nil(t, err)
+	assert.Equal(t, "file", attrs.Name)
+}
+
+// Once the policy's attempts are spent the lock is reported as it is.
+func TestStatReturnsEBUSYWhenTheSubtreeStaysLocked(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
+	hdfsAccessor.EXPECT().IsAvailable().Return(true).AnyTimes()
+	ftHdfsAccessor := NewFaultTolerantHdfsAccessor(hdfsAccessor, atMost2Attempts())
+	hdfsAccessor.EXPECT().Stat("/test/file").Return(Attrs{}, syscall.EBUSY).Times(2)
+	_, err := ftHdfsAccessor.Stat("/test/file")
+	assert.Equal(t, syscall.EBUSY, err)
 }
 
 // generates a test retry policy which allows 2 attempst

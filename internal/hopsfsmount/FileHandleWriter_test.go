@@ -208,6 +208,45 @@ func TestWriteClosesTheReaderOfAFailedDownloadToStaging(t *testing.T) {
 	assert.False(t, reader.IsClosed)
 }
 
+// A flush refused with EBUSY, the client's word for a subtree lock it has
+// waited out, retries without closing the shared client: the mock refuses
+// any Close. The first writer's Close is the refused call, so the retry
+// recreates the file with a second writer.
+func TestFlushKeepsTheClientOnASubtreeLock(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	mockClock := &MockClock{}
+	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
+	hdfsAccessor.EXPECT().IsAvailable().Return(true).AnyTimes()
+	fileName := "/testFlushSubtreeLock"
+	fs, _ := NewFileSystem([]HdfsAccessor{hdfsAccessor}, "/", []string{"*"}, false, DelaySyncUntilClose, NewDefaultRetryPolicy(mockClock), mockClock)
+
+	refused := NewMockHdfsWriter(mockCtrl)
+	refused.EXPECT().Write(gomock.Any()).Return(11, nil).AnyTimes()
+	refused.EXPECT().Close().Return(syscall.EBUSY)
+	accepted := NewMockHdfsWriter(mockCtrl)
+	accepted.EXPECT().Write(gomock.Any()).Return(11, nil).AnyTimes()
+	accepted.EXPECT().Close().Return(nil).AnyTimes()
+	hdfsAccessor.EXPECT().CreateFileWithGroup(fileName, gomock.Any(), gomock.Any(), gomock.Any()).Return(refused, nil)
+	hdfsAccessor.EXPECT().CreateFileWithGroup(fileName, gomock.Any(), gomock.Any(), gomock.Any()).Return(accepted, nil)
+	hdfsAccessor.EXPECT().Remove(fileName).Return(nil).AnyTimes()
+	hdfsAccessor.EXPECT().Stat(fileName).Return(Attrs{Name: fileName}, nil).AnyTimes()
+	hdfsAccessor.EXPECT().Chown(fileName, gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+	hdfsAccessor.EXPECT().StatFs().Return(FsInfo{capacity: uint64(100), used: uint64(20), remaining: uint64(80)}, nil).AnyTimes()
+
+	root, _ := fs.Root()
+	_, h, err := root.(*DirINode).Create(nil, &fuse.CreateRequest{Name: fileName,
+		Flags: fuse.OpenReadWrite | fuse.OpenCreate, Mode: os.FileMode(0757)}, &fuse.CreateResponse{})
+	assert.Nil(t, err)
+	fileHandle := h.(*FileHandle)
+	err = fileHandle.Write(nil, &fuse.WriteRequest{Data: []byte("hello world"), Offset: int64(0)}, &fuse.WriteResponse{})
+	assert.Nil(t, err)
+
+	err = fileHandle.Flush(nil, nil)
+	assert.Nil(t, err)
+	err = fileHandle.Release(nil, nil)
+	assert.Nil(t, err)
+}
+
 func TestFlushFile(t *testing.T) {
 	t.Skip()
 	mockCtrl := gomock.NewController(t)

@@ -223,8 +223,12 @@ func (file *FileINode) flushToDFS(operation string) error {
 			}
 			return err
 		}
-		// Reconnect and try again
-		file.FileSystem.getDFSConnector().Close()
+		// Reconnect and try again, unless the namenode answered over a healthy
+		// connection with a subtree lock: closing the shared client then only
+		// cuts the connection under every open reader.
+		if needsReconnect(err) {
+			file.FileSystem.getDFSConnector().Close()
+		}
 		logger.Warn("Failed to copy file to DFS", file.logInfo(logger.Fields{Operation: operation}))
 	}
 }

@@ -4,6 +4,7 @@
 package hopsfsmount
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -222,7 +223,7 @@ func (dfs *HdfsAccessorImpl) ReadDir(path string) ([]Attrs, error) {
 	}
 	files, err := dfs.MetadataClient.ReadDir(path)
 	if err != nil {
-		if IsSuccessOrNonRetriableError(err) {
+		if IsSuccessOrNonRetriableError(err) || !needsReconnect(err) {
 			// benign error (e.g. path not found)
 			return nil, unwrapAndTranslateError(err)
 		}
@@ -255,7 +256,7 @@ func (dfs *HdfsAccessorImpl) Stat(path string) (Attrs, error) {
 
 	if err != nil {
 		logger.Debug("Backend Stat failed", logger.Fields{Operation: "stat", Path: path, Duration: fmt.Sprintf("%.3fms", duration.Seconds()*1000), Error: err})
-		if IsSuccessOrNonRetriableError(err) {
+		if IsSuccessOrNonRetriableError(err) || !needsReconnect(err) {
 			// benign error (e.g. path not found)
 			return Attrs{}, unwrapAndTranslateError(err)
 		}
@@ -281,7 +282,7 @@ func (dfs *HdfsAccessorImpl) StatFs() (FsInfo, error) {
 
 	fsInfo, err := dfs.MetadataClient.StatFs()
 	if err != nil {
-		if IsSuccessOrNonRetriableError(err) {
+		if IsSuccessOrNonRetriableError(err) || !needsReconnect(err) {
 			return FsInfo{}, unwrapAndTranslateError(err)
 		}
 		dfs.MetadataClient.Close()
@@ -428,6 +429,16 @@ func isNonRetriableError(err error) bool {
 	} else {
 		return false
 	}
+}
+
+// A failure the mount does not recognize may be a dead connection, so the
+// client is rebuilt before the next attempt. EBUSY is the client's word for a
+// path under a subtree operation after its own retries: the namenode answered
+// over a healthy connection, so the client stays, and with it the readers
+// sharing its connection. Matched without translating the error again, which
+// would log an unrecognized failure a second time.
+func needsReconnect(err error) bool {
+	return !errors.Is(err, syscall.EBUSY)
 }
 
 // Creates a directory
