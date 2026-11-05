@@ -16,9 +16,9 @@ type FaultTolerantHdfsAccessor struct {
 
 var _ HdfsAccessor = (*FaultTolerantHdfsAccessor)(nil) // ensure FaultTolerantHdfsAccessor implements HdfsAccessor
 
-// IsAvailable delegates to the underlying accessor
-func (fta *FaultTolerantHdfsAccessor) IsAvailable() bool {
-	return fta.Impl.IsAvailable()
+// TryReserve delegates to the underlying accessor
+func (fta *FaultTolerantHdfsAccessor) TryReserve() bool {
+	return fta.Impl.TryReserve()
 }
 
 // Creates an instance of FaultTolerantHdfsAccessor

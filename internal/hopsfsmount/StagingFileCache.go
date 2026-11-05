@@ -551,12 +551,12 @@ func diskUsageExcess(path string, threshold float64) (excessBytes int64, err err
 // GetOrLoad tries to get a file from cache, or downloads it to cache if not found.
 // Returns an *os.File handle if successful (either from cache or freshly downloaded), or (nil, nil) if caching is not possible.
 // Returns (nil, error) if staging file creation fails.
-func (c *StagingFileCache) GetOrLoad(file *FileINode, hdfsAccessor HdfsAccessor, operation string) (*os.File, error) {
+func (c *StagingFileCache) GetOrLoad(file *FileINode, operation string) (*os.File, error) {
 	absPath := file.AbsolutePath()
 
 	// Check if file exists in cache before making expensive Stat call
 	if c.Contains(absPath) {
-		upstreamInfo, err := hdfsAccessor.Stat(absPath)
+		upstreamInfo, err := file.FileSystem.getDFSConnector().Stat(absPath)
 		if err != nil {
 			logger.Warn("Failed to stat file for cache validation, skipping cache", logger.Fields{
 				Operation: Cache,

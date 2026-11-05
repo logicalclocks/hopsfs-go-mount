@@ -18,7 +18,7 @@ func TestReadWriteFile(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	mockClock := &MockClock{}
 	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
-	hdfsAccessor.EXPECT().IsAvailable().Return(true).AnyTimes()
+	hdfsAccessor.EXPECT().TryReserve().Return(true).AnyTimes()
 	fileName := "/testWriteFile_1"
 	fs, _ := NewFileSystem([]HdfsAccessor{hdfsAccessor}, "/", []string{"*"}, false, DelaySyncUntilClose, NewDefaultRetryPolicy(mockClock), mockClock)
 
@@ -62,7 +62,7 @@ func TestFaultTolerantWriteFile(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	mockClock := &MockClock{}
 	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
-	hdfsAccessor.EXPECT().IsAvailable().Return(true).AnyTimes()
+	hdfsAccessor.EXPECT().TryReserve().Return(true).AnyTimes()
 	fileName := "/testWriteFile_1"
 	fs, _ := NewFileSystem([]HdfsAccessor{hdfsAccessor}, "/", []string{"*"}, false, DelaySyncUntilClose, NewDefaultRetryPolicy(mockClock), mockClock)
 
@@ -140,7 +140,7 @@ func openExistingFileReadOnly(t *testing.T, name string) (*FileHandle, *MockHdfs
 	mockCtrl := gomock.NewController(t)
 	mockClock := &MockClock{}
 	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
-	hdfsAccessor.EXPECT().IsAvailable().Return(true).AnyTimes()
+	hdfsAccessor.EXPECT().TryReserve().Return(true).AnyTimes()
 	fs, _ := NewFileSystem([]HdfsAccessor{hdfsAccessor}, "/", []string{"*"}, false, DelaySyncUntilClose, NewDefaultRetryPolicy(mockClock), mockClock)
 	root, _ := fs.Root()
 	file := root.(*DirINode).addOrUpdateChildInodeAttrs("unit_test", name, Attrs{Name: name, Mode: os.FileMode(0644)}).(*FileINode)
@@ -216,7 +216,7 @@ func TestFlushKeepsTheClientOnASubtreeLock(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	mockClock := &MockClock{}
 	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
-	hdfsAccessor.EXPECT().IsAvailable().Return(true).AnyTimes()
+	hdfsAccessor.EXPECT().TryReserve().Return(true).AnyTimes()
 	fileName := "/testFlushSubtreeLock"
 	fs, _ := NewFileSystem([]HdfsAccessor{hdfsAccessor}, "/", []string{"*"}, false, DelaySyncUntilClose, NewDefaultRetryPolicy(mockClock), mockClock)
 
@@ -252,7 +252,7 @@ func TestFlushFile(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	mockClock := &MockClock{}
 	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
-	hdfsAccessor.EXPECT().IsAvailable().Return(true).AnyTimes()
+	hdfsAccessor.EXPECT().TryReserve().Return(true).AnyTimes()
 	readSeekCloser := NewMockReadSeekCloser(mockCtrl)
 
 	hdfsAccessor.EXPECT().OpenRead("/testWriteFile_2").Return(readSeekCloser, nil).AnyTimes()
