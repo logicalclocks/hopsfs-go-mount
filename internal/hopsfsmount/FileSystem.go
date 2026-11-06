@@ -5,9 +5,9 @@ package hopsfsmount
 
 import (
 	"fmt"
-	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
@@ -23,8 +23,11 @@ import (
 )
 
 type FileSystem struct {
-	HdfsAccessors       []HdfsAccessor           // Interface to access HDFS
-	hdfsAccessorsIndex  int                      // Round-robin index over HdfsAccessors
+	HdfsAccessors       []HdfsAccessor // Interface to access HDFS
+	hdfsAccessorsIndex  int            // Round-robin index over HdfsAccessors
+	hdfsAccessorsLock   sync.Mutex     // guards HdfsAccessors and hdfsAccessorsIndex
+	maxHdfsAccessors    int            // HdfsAccessors grows on demand up to this, when newHdfsAccessor is set
+	newHdfsAccessor     func() (HdfsAccessor, error)
 	SrcDir              string                   // Src directory that will mounted
 	AllowedPrefixes     []string                 // List of allowed path prefixes (only those prefixes are exposed via mountpoint)
 	VirtualDirectories  []VirtualDirectoryConfig // Configured virtual directories exposed as synthetic entries at the mount root
@@ -66,6 +69,21 @@ func NewFileSystem(hdfsAccessors []HdfsAccessor, srcDir string, allowedPrefixes 
 		return nil, err
 	}
 	return filesystem, nil
+}
+
+// WithExtraConnectors lets the file system add up to extra connectors, made
+// by newConnector, whenever every connector it has is busy. A connector is
+// busy for the whole of a call, and a call under a subtree operation waits
+// inside the client for as long as the operation runs, so without spare
+// connectors one such call holds up every other operation on the mount.
+// An added connector stays, its namenode connection open, for the life of
+// the mount: the namenode closes idle connections only once it holds
+// ipc.client.idlethreshold (4000) of them.
+func WithExtraConnectors(extra int, newConnector func() (HdfsAccessor, error)) FileSystemOption {
+	return func(filesystem *FileSystem) {
+		filesystem.maxHdfsAccessors = len(filesystem.HdfsAccessors) + extra
+		filesystem.newHdfsAccessor = newConnector
+	}
 }
 
 // Mounts the filesystem
@@ -170,19 +188,51 @@ func (filesystem *FileSystem) Statfs(ctx context.Context, req *fuse.StatfsReques
 	return nil
 }
 
+// A request waiting for a connector to free scans the pool again after these
+// waits, doubling from the first to the last, so it picks up a freed
+// connector within maxConnectorWait without spinning on the pool lock.
+const (
+	minConnectorWait = time.Millisecond
+	maxConnectorWait = 10 * time.Millisecond
+)
+
+// Returns a connector, round robin, reserved for the caller's next call (see
+// TryReserve). When every connector is in a call or reserved, one more is
+// added, up to the limit WithExtraConnectors set; at the limit the caller
+// waits for a connector to free. Call it where the call is made, as in
+// getDFSConnector().Stat(path): a reservation not taken up keeps other
+// requests off the connector until it lapses.
 func (filesystem *FileSystem) getDFSConnector() HdfsAccessor {
-	n := len(filesystem.HdfsAccessors)
+	wait := minConnectorWait
 	for {
+		filesystem.hdfsAccessorsLock.Lock()
+		n := len(filesystem.HdfsAccessors)
 		start := filesystem.hdfsAccessorsIndex + 1
 		for i := 0; i < n; i++ {
 			index := (start + i) % n
-			if filesystem.HdfsAccessors[index].IsAvailable() {
+			if filesystem.HdfsAccessors[index].TryReserve() {
 				filesystem.hdfsAccessorsIndex = index
-				return filesystem.HdfsAccessors[index]
+				connector := filesystem.HdfsAccessors[index]
+				filesystem.hdfsAccessorsLock.Unlock()
+				return connector
 			}
 		}
-		// All connections busy — yield and retry.
-		// Normal operations finish in milliseconds, so this resolves quickly.
-		runtime.Gosched()
+		if filesystem.newHdfsAccessor != nil && n < filesystem.maxHdfsAccessors {
+			connector, err := filesystem.newHdfsAccessor()
+			if err == nil {
+				// Visible to other callers once the lock is released.
+				connector.TryReserve()
+				filesystem.HdfsAccessors = append(filesystem.HdfsAccessors, connector)
+				filesystem.hdfsAccessorsIndex = n
+				filesystem.hdfsAccessorsLock.Unlock()
+				logger.Info(fmt.Sprintf("All %d connectors are busy, added one: %d of at most %d", n, n+1, filesystem.maxHdfsAccessors), nil)
+				return connector
+			}
+			logger.Warn(fmt.Sprintf("All %d connectors are busy and a new one could not be made", n), logger.Fields{Error: err})
+		}
+		filesystem.hdfsAccessorsLock.Unlock()
+		// Every connector can be waiting out a subtree operation for minutes.
+		time.Sleep(wait)
+		wait = min(2*wait, maxConnectorWait)
 	}
 }

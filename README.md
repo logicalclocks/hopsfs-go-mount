@@ -51,6 +51,8 @@ Options:
         logs to be printed. error, warn, info, debug, trace (default "info")
   -numConnections int
         Number of connections with the namenode (default 1)
+  -numExtraConnections int
+        Connections added on demand, on top of numConnections, while every connection is busy; a request under a subtree operation keeps its connection busy for as long as the operation runs. An added connection stays open until the mount exits. 0 disables (default 20)
   -readOnly
         Enables mount with readonly
   -retryMaxAttempts int
@@ -90,6 +92,31 @@ Options:
         compact form (<name>:<backend-root>:<backend-dirs>;...) or a JSON array of
         {name,paths,backendRoot} objects. See the "Virtual Directories" section below.
 ```
+
+Namenode Connections
+--------------------
+
+The mount opens `-numConnections` connections to the namenode at start. A
+request takes a connection that is not in a call and keeps it for the whole
+call. A request under a directory locked by a subtree operation (a recursive
+delete, a directory rename, a quota recalculation) waits inside the client
+until the operation finishes, which can take minutes on a large tree, and its
+connection stays busy for that long.
+
+When every connection is busy the mount opens one more, up to
+`-numExtraConnections` on top of `-numConnections`; at that limit a request
+waits until a connection frees. With `-numConnections 3` and the default
+`-numExtraConnections 20` the mount uses at most 23 connections. Each
+addition is logged at INFO:
+
+```
+All 3 connectors are busy, added one: 4 of at most 23
+```
+
+An added connection stays open until the mount exits. The namenode closes
+idle connections only once it holds `ipc.client.idlethreshold` (4000) of
+them, so size the limit with the number of mounts in mind.
+`-numExtraConnections 0` turns adding connections off.
 
 Virtual Directories
 -------------------

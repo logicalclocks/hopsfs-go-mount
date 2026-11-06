@@ -16,9 +16,9 @@ type FaultTolerantHdfsAccessor struct {
 
 var _ HdfsAccessor = (*FaultTolerantHdfsAccessor)(nil) // ensure FaultTolerantHdfsAccessor implements HdfsAccessor
 
-// IsAvailable delegates to the underlying accessor
-func (fta *FaultTolerantHdfsAccessor) IsAvailable() bool {
-	return fta.Impl.IsAvailable()
+// TryReserve delegates to the underlying accessor
+func (fta *FaultTolerantHdfsAccessor) TryReserve() bool {
+	return fta.Impl.TryReserve()
 }
 
 // Creates an instance of FaultTolerantHdfsAccessor
@@ -49,8 +49,7 @@ func (fta *FaultTolerantHdfsAccessor) OpenRead(path string) (ReadSeekCloser, err
 		}
 		if IsSuccessOrNonRetriableError(err) || !op.ShouldRetry("[%s] OpenRead: %s", path, err) {
 			return nil, err
-		} else {
-			// Clean up the bad connection, to let underline connection to get automatic refresh
+		} else if needsReconnect(err) {
 			fta.Impl.Close()
 		}
 	}
@@ -73,8 +72,7 @@ func (fta *FaultTolerantHdfsAccessor) ReadDir(path string) ([]Attrs, error) {
 		result, err := fta.Impl.ReadDir(path)
 		if IsSuccessOrNonRetriableError(err) || !op.ShouldRetry("[%s] ReadDir: %s", path, err) {
 			return result, err
-		} else {
-			// Clean up the bad connection, to let underline connection to get automatic refresh
+		} else if needsReconnect(err) {
 			fta.Impl.Close()
 		}
 	}
@@ -87,8 +85,7 @@ func (fta *FaultTolerantHdfsAccessor) Stat(path string) (Attrs, error) {
 		result, err := fta.Impl.Stat(path)
 		if IsSuccessOrNonRetriableError(err) || !op.ShouldRetry("[%s] Stat: %s", path, err) {
 			return result, err
-		} else {
-			// Clean up the bad connection, to let underline connection to get automatic refresh
+		} else if needsReconnect(err) {
 			fta.Impl.Close()
 		}
 	}
@@ -101,8 +98,7 @@ func (fta *FaultTolerantHdfsAccessor) StatFs() (FsInfo, error) {
 		result, err := fta.Impl.StatFs()
 		if IsSuccessOrNonRetriableError(err) || !op.ShouldRetry("StatFs: %s", err) {
 			return result, err
-		} else {
-			// Clean up the bad connection, to let underline connection to get automatic refresh
+		} else if needsReconnect(err) {
 			fta.Impl.Close()
 		}
 	}
@@ -115,8 +111,7 @@ func (fta *FaultTolerantHdfsAccessor) Mkdir(path string, mode os.FileMode) error
 		err := fta.Impl.Mkdir(path, mode)
 		if IsSuccessOrNonRetriableError(err) || !op.ShouldRetry("[%s] Mkdir %s: %s", path, mode, err) {
 			return err
-		} else {
-			// Clean up the bad connection, to let underline connection to get automatic refresh
+		} else if needsReconnect(err) {
 			fta.Impl.Close()
 		}
 	}
@@ -129,8 +124,7 @@ func (fta *FaultTolerantHdfsAccessor) MkdirWithGroup(path string, mode os.FileMo
 		err := fta.Impl.MkdirWithGroup(path, mode, groupname)
 		if IsSuccessOrNonRetriableError(err) || !op.ShouldRetry("[%s] MkdirWithGroup %s (group=%s): %s", path, mode, groupname, err) {
 			return err
-		} else {
-			// Clean up the bad connection, to let underline connection to get automatic refresh
+		} else if needsReconnect(err) {
 			fta.Impl.Close()
 		}
 	}
@@ -143,8 +137,7 @@ func (fta *FaultTolerantHdfsAccessor) Remove(path string) error {
 		err := fta.Impl.Remove(path)
 		if IsSuccessOrNonRetriableError(err) || !op.ShouldRetry("[%s] Remove: %s", path, err) {
 			return err
-		} else {
-			// Clean up the bad connection, to let underline connection to get automatic refresh
+		} else if needsReconnect(err) {
 			fta.Impl.Close()
 		}
 	}
@@ -157,8 +150,7 @@ func (fta *FaultTolerantHdfsAccessor) Rename(oldPath string, newPath string) err
 		err := fta.Impl.Rename(oldPath, newPath)
 		if IsSuccessOrNonRetriableError(err) || !op.ShouldRetry("[%s] Rename to %s: %s", oldPath, newPath, err) {
 			return err
-		} else {
-			// Clean up the bad connection, to let underline connection to get automatic refresh
+		} else if needsReconnect(err) {
 			fta.Impl.Close()
 		}
 	}
@@ -171,8 +163,7 @@ func (fta *FaultTolerantHdfsAccessor) Rename2(oldPath string, newPath string, op
 		err := fta.Impl.Rename2(oldPath, newPath, options)
 		if IsSuccessOrNonRetriableError(err) || !op.ShouldRetry("[%s] Rename to %s: %s", oldPath, newPath, err) {
 			return err
-		} else {
-			// Clean up the bad connection, to let underline connection to get automatic refresh
+		} else if needsReconnect(err) {
 			fta.Impl.Close()
 		}
 	}
@@ -185,8 +176,7 @@ func (fta *FaultTolerantHdfsAccessor) Chmod(path string, mode os.FileMode) error
 		err := fta.Impl.Chmod(path, mode)
 		if IsSuccessOrNonRetriableError(err) || !op.ShouldRetry("Chmod [%s] to [%d]: %s", path, mode, err) {
 			return err
-		} else {
-			// Clean up the bad connection, to let underline connection to get automatic refresh
+		} else if needsReconnect(err) {
 			fta.Impl.Close()
 		}
 	}
@@ -199,8 +189,7 @@ func (fta *FaultTolerantHdfsAccessor) Chown(path string, user, group string) err
 		err := fta.Impl.Chown(path, user, group)
 		if IsSuccessOrNonRetriableError(err) || !op.ShouldRetry("Chown [%s] to [%s:%s]: %s", path, user, group, err) {
 			return err
-		} else {
-			// Clean up the bad connection, to let underline connection to get automatic refresh
+		} else if needsReconnect(err) {
 			fta.Impl.Close()
 		}
 	}

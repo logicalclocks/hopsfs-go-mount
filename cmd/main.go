@@ -43,16 +43,21 @@ func main() {
 		ClientKey:         hopsfsmount.ClientKey,
 	}
 
-	ftHdfsAccessors := make([]hopsfsmount.HdfsAccessor, hopsfsmount.Connectors)
-
-	for i := 0; i < hopsfsmount.Connectors; i++ {
+	newConnector := func() (hopsfsmount.HdfsAccessor, error) {
 		hdfsAccessor, err := hopsfsmount.NewHdfsAccessor(hopsRpcAddress, hopsfsmount.WallClock{}, tlsConfig)
 		if err != nil {
+			return nil, err
+		}
+		return hopsfsmount.NewFaultTolerantHdfsAccessor(hdfsAccessor, retryPolicy), nil
+	}
+	ftHdfsAccessors := make([]hopsfsmount.HdfsAccessor, hopsfsmount.Connectors)
+	for i := 0; i < hopsfsmount.Connectors; i++ {
+		var err error
+		if ftHdfsAccessors[i], err = newConnector(); err != nil {
 			logger.Fatal(fmt.Sprintf("Error/NewHopsFSAccessor: %v ", err), nil)
 		}
-		ftHdfsAccessors[i] = hopsfsmount.NewFaultTolerantHdfsAccessor(hdfsAccessor, retryPolicy)
 	}
-	logger.Info(fmt.Sprintf("Create %d file system clients", len(ftHdfsAccessors)), nil)
+	logger.Info(fmt.Sprintf("Create %d file system clients, up to %d more on demand", len(ftHdfsAccessors), hopsfsmount.ExtraConnectors), nil)
 
 	if strings.Compare(hopsfsmount.MntSrcDir, "/") != 0 {
 		err := checkSrcMountPath(ftHdfsAccessors[0])
@@ -78,7 +83,7 @@ func main() {
 	}
 
 	fileSystem, err := hopsfsmount.NewFileSystem(ftHdfsAccessors, hopsfsmount.MntSrcDir, allowedPrefixes, hopsfsmount.ReadOnly, hopsfsmount.DelaySyncUntilClose, retryPolicy, hopsfsmount.WallClock{},
-		virtualDirectoryOption)
+		virtualDirectoryOption, hopsfsmount.WithExtraConnectors(hopsfsmount.ExtraConnectors, newConnector))
 	if err != nil {
 		logger.Fatal(fmt.Sprintf("Error/NewFileSystem: %v ", err), nil)
 	}
