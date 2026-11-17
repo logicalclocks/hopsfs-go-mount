@@ -4,12 +4,12 @@
 package hopsfsmount
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -44,7 +44,7 @@ type HdfsAccessor interface {
 	Chown(path string, owner, group string) error // Changes the owner and group of the file
 	Chmod(path string, mode os.FileMode) error    // Changes the mode of the file
 	Close() error                                 // Close current meta connection if needed
-	IsAvailable() bool                            // Returns true if the accessor is not busy
+	TryReserve() bool                             // Reserves the accessor for the caller's next call if it is free
 }
 
 type TLSConfig struct {
@@ -61,7 +61,8 @@ type HdfsAccessorImpl struct {
 	MetadataClient      *hdfs.Client // HDFS client used for metadata operations
 	MetadataClientMutex sync.Mutex   // Serializing all metadata operations for simplicity (for now), TODO: allow N concurrent operations
 	TLSConfig           TLSConfig    // enable/disable using tls
-	busy                atomic.Bool  // set while MetadataClientMutex is held
+	reserved            bool         // a TryReserve no call has taken up yet; guarded by MetadataClientMutex
+	reservedAt          time.Time    // when that TryReserve was
 }
 
 var _ HdfsAccessor = (*HdfsAccessorImpl)(nil) // ensure hdfsAccessorImpl implements HdfsAccessor
@@ -222,7 +223,7 @@ func (dfs *HdfsAccessorImpl) ReadDir(path string) ([]Attrs, error) {
 	}
 	files, err := dfs.MetadataClient.ReadDir(path)
 	if err != nil {
-		if IsSuccessOrNonRetriableError(err) {
+		if IsSuccessOrNonRetriableError(err) || !needsReconnect(err) {
 			// benign error (e.g. path not found)
 			return nil, unwrapAndTranslateError(err)
 		}
@@ -255,7 +256,7 @@ func (dfs *HdfsAccessorImpl) Stat(path string) (Attrs, error) {
 
 	if err != nil {
 		logger.Debug("Backend Stat failed", logger.Fields{Operation: "stat", Path: path, Duration: fmt.Sprintf("%.3fms", duration.Seconds()*1000), Error: err})
-		if IsSuccessOrNonRetriableError(err) {
+		if IsSuccessOrNonRetriableError(err) || !needsReconnect(err) {
 			// benign error (e.g. path not found)
 			return Attrs{}, unwrapAndTranslateError(err)
 		}
@@ -281,7 +282,7 @@ func (dfs *HdfsAccessorImpl) StatFs() (FsInfo, error) {
 
 	fsInfo, err := dfs.MetadataClient.StatFs()
 	if err != nil {
-		if IsSuccessOrNonRetriableError(err) {
+		if IsSuccessOrNonRetriableError(err) || !needsReconnect(err) {
 			return FsInfo{}, unwrapAndTranslateError(err)
 		}
 		dfs.MetadataClient.Close()
@@ -430,6 +431,16 @@ func isNonRetriableError(err error) bool {
 	}
 }
 
+// A failure the mount does not recognize may be a dead connection, so the
+// client is rebuilt before the next attempt. EBUSY is the client's word for a
+// path under a subtree operation after its own retries: the namenode answered
+// over a healthy connection, so the client stays, and with it the readers
+// sharing its connection. Matched without translating the error again, which
+// would log an unrecognized failure a second time.
+func needsReconnect(err error) bool {
+	return !errors.Is(err, syscall.EBUSY)
+}
+
 // Creates a directory
 func (dfs *HdfsAccessorImpl) Mkdir(path string, mode os.FileMode) error {
 	return dfs.MkdirWithGroup(path, mode, "")
@@ -567,18 +578,37 @@ func (dfs *HdfsAccessorImpl) Close() error {
 	return nil
 }
 
-// IsAvailable returns true if the mutex is not currently held
-func (dfs *HdfsAccessorImpl) IsAvailable() bool {
-	return !dfs.busy.Load()
+// A reservation no call takes up lapses after this long, so a caller that
+// takes an accessor and makes no call keeps other requests off it for a
+// second, not for the life of the mount.
+const reservationTimeout = time.Second
+
+// TryReserve reports whether no call holds the accessor and no other caller
+// has it reserved, and if so reserves it until the caller's next call takes
+// MetadataClientMutex. Between being handed an accessor and taking the mutex
+// a caller holds nothing, so without the reservation a second request could
+// be handed the same accessor and wait out the first one's whole call, one
+// under a subtree operation included. It never waits: the check and the
+// reservation are made holding the mutex, so no call starts between them.
+func (dfs *HdfsAccessorImpl) TryReserve() bool {
+	if !dfs.MetadataClientMutex.TryLock() {
+		return false
+	}
+	defer dfs.MetadataClientMutex.Unlock()
+	now := dfs.Clock.Now()
+	if dfs.reserved && now.Sub(dfs.reservedAt) < reservationTimeout {
+		return false
+	}
+	dfs.reserved, dfs.reservedAt = true, now
+	return true
 }
 
 func (dfs *HdfsAccessorImpl) lockHadoopClient() {
 	dfs.MetadataClientMutex.Lock()
-	dfs.busy.Store(true)
+	dfs.reserved = false
 }
 
 func (dfs *HdfsAccessorImpl) unlockHadoopClient() {
-	dfs.busy.Store(false)
 	dfs.MetadataClientMutex.Unlock()
 }
 

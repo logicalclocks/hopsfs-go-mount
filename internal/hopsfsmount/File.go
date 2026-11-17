@@ -93,6 +93,11 @@ func (file *FileINode) Attr(ctx context.Context, a *fuse.Attr) error {
 	if file.FileSystem.Clock.Now().After(file.Attrs.Expires) {
 		_, err := parentStatInodeInHopsFS(file.Parent, GetattrFile, file.Attrs.Name, &file.Attrs)
 		if err != nil {
+			if err == syscall.ENOENT {
+				// A file this mount knew has gone from the backend: the one
+				// ENOENT on a known file, so it is logged at the default level.
+				logger.Warn("Known file not found on backend", logger.Fields{Operation: GetattrFile, Path: file.AbsolutePath(), Error: err})
+			}
 			return err
 		}
 	} else {
@@ -218,8 +223,12 @@ func (file *FileINode) flushToDFS(operation string) error {
 			}
 			return err
 		}
-		// Reconnect and try again
-		file.FileSystem.getDFSConnector().Close()
+		// Reconnect and try again, unless the namenode answered over a healthy
+		// connection with a subtree lock: closing the shared client then only
+		// cuts the connection under every open reader.
+		if needsReconnect(err) {
+			file.FileSystem.getDFSConnector().Close()
+		}
 		logger.Warn("Failed to copy file to DFS", file.logInfo(logger.Fields{Operation: operation}))
 	}
 }
@@ -236,8 +245,6 @@ func (file *FileINode) flushAttempt(operation string) error {
 	}
 	file.unlockFileHandles()
 
-	hdfsAccessor := file.FileSystem.getDFSConnector()
-
 	// If we have a pending writer from initial file creation, reuse it directly.
 	// This avoids the redundant Close+Remove+Recreate cycle for new files.
 	var w HdfsWriter
@@ -249,7 +256,7 @@ func (file *FileINode) flushAttempt(operation string) error {
 		// Retry path or subsequent flush: delete the file and recreate.
 		// We cannot rely on the overwrite functionality of CreateFile API.
 		// For example if the file has permission set to 444 then we can not overwrite it.
-		err := hdfsAccessor.Remove(file.AbsolutePath())
+		err := file.FileSystem.getDFSConnector().Remove(file.AbsolutePath())
 		if err != nil {
 			// may be this is a retry and the file has already been deleted
 			// log error and continue
@@ -257,7 +264,7 @@ func (file *FileINode) flushAttempt(operation string) error {
 		}
 
 		var createErr error
-		w, createErr = hdfsAccessor.CreateFileWithGroup(file.AbsolutePath(), file.Attrs.Mode, true, file.Attrs.DFSGroupName)
+		w, createErr = file.FileSystem.getDFSConnector().CreateFileWithGroup(file.AbsolutePath(), file.Attrs.Mode, true, file.Attrs.DFSGroupName)
 		if createErr != nil {
 			logger.Error("Error creating file in DFS", file.logInfo(logger.Fields{Operation: operation, Error: createErr}))
 			return createErr
@@ -323,7 +330,7 @@ func (file *FileINode) flushAttempt(operation string) error {
 	// Stat the file to get the server-assigned mtime after upload
 	// This is needed for cache validation on subsequent reads
 	if StagingCache != nil {
-		upstreamInfo, err := hdfsAccessor.Stat(file.AbsolutePath())
+		upstreamInfo, err := file.FileSystem.getDFSConnector().Stat(file.AbsolutePath())
 		if err != nil {
 			logger.Warn("Failed to stat file after upload, mtime may be stale", file.logInfo(logger.Fields{Operation: operation, Error: err}))
 		} else {
@@ -432,9 +439,8 @@ func (file *FileINode) createStagingFile(operation string, existsInDFS bool) (*o
 
 	//create staging file
 	absPath := file.AbsolutePath()
-	hdfsAccessor := file.FileSystem.getDFSConnector()
 	if !existsInDFS { // it  is a new file so create it in the DFS
-		w, err := hdfsAccessor.CreateFileWithGroup(absPath, ComputePermissions(file.Attrs.Mode), false, file.Attrs.DFSGroupName)
+		w, err := file.FileSystem.getDFSConnector().CreateFileWithGroup(absPath, ComputePermissions(file.Attrs.Mode), false, file.Attrs.DFSGroupName)
 		if err != nil {
 			logger.Error("Failed to create file in DFS", file.logInfo(logger.Fields{Operation: operation, Error: err}))
 			return nil, err
@@ -444,11 +450,14 @@ func (file *FileINode) createStagingFile(operation string, existsInDFS bool) (*o
 		file.pendingDFSWriter = w
 		logger.Info("Created file in DFS with group (writer kept open)", file.logInfo(logger.Fields{Operation: operation, Group: file.Attrs.DFSGroupName}))
 	} else {
-		// Request to write to existing file - stat to verify it exists and get metadata
-		upstreamInfo, err := hdfsAccessor.Stat(absPath)
+		// Request to write to existing file - stat to verify it exists and get metadata.
+		// The error is passed through: only a backend "not found" is ENOENT, a
+		// NameNode or connection failure stays EIO, so the application does not
+		// take a transient failure for a missing file.
+		upstreamInfo, err := file.FileSystem.getDFSConnector().Stat(absPath)
 		if err != nil {
 			logger.Error("Failed to stat file in DFS", file.logInfo(logger.Fields{Operation: operation, Error: err}))
-			return nil, syscall.ENOENT
+			return nil, err
 		}
 
 		// Check if we have a valid cached staging file for this path
@@ -490,14 +499,14 @@ func (file *FileINode) newStagingFile(operation string, download bool) (*os.File
 }
 
 func (file *FileINode) downloadToStaging(stagingFile *os.File, operation string) error {
-	hdfsAccessor := file.FileSystem.getDFSConnector()
 	absPath := file.AbsolutePath()
 
-	reader, err := hdfsAccessor.OpenRead(absPath)
+	reader, err := file.FileSystem.getDFSConnector().OpenRead(absPath)
 	if err != nil {
 		logger.Error("Failed to open file in DFS", file.logInfo(logger.Fields{Operation: operation, Error: err}))
 		return err
 	}
+	defer reader.Close()
 
 	nc, err := io.Copy(stagingFile, reader)
 	if err != nil {
@@ -506,7 +515,6 @@ func (file *FileINode) downloadToStaging(stagingFile *os.File, operation string)
 			file.logInfo(logger.Fields{Operation: operation, Error: err}))
 		return err
 	}
-	reader.Close()
 	logger.Info(
 		fmt.Sprintf("Downloaded a copy to staging dir. %d bytes copied", nc),
 		file.logInfo(logger.Fields{Operation: operation}))
@@ -546,11 +554,10 @@ func (file *FileINode) NewFileHandle(existsInDFS bool, flags fuse.OpenFlags) (*F
 			logger.Info("Opened file, Returning existing handle", fh.logInfo(logger.Fields{Operation: operation, Flags: fh.fileFlags}))
 		} else {
 			absPath := file.AbsolutePath()
-			hdfsAccessor := file.FileSystem.getDFSConnector()
 
 			// Try to get from cache or download to cache
 			if StagingCache != nil {
-				localFile, err := StagingCache.GetOrLoad(file, hdfsAccessor, operation)
+				localFile, err := StagingCache.GetOrLoad(file, operation)
 				if err != nil {
 					return nil, err
 				}
@@ -561,7 +568,7 @@ func (file *FileINode) NewFileHandle(existsInDFS bool, flags fuse.OpenFlags) (*F
 
 			// If no local file proxy was set, open from HopsFS in RO mode
 			if fh.File.fileProxy == nil {
-				reader, err := hdfsAccessor.OpenRead(absPath)
+				reader, err := file.FileSystem.getDFSConnector().OpenRead(absPath)
 				if err != nil {
 					logger.Warn(
 						"Opening file failed",
@@ -610,18 +617,22 @@ func (file *FileINode) upgradeHandleForWriting(me *FileHandle, operation string)
 		// that the caller (Write/Truncate) already holds
 
 		remoteROFileProxy, _ := file.fileProxy.(*RemoteROFileProxy)
-		remoteROFileProxy.hdfsReader.Close() // close this read only handle
-		file.fileProxy = nil
-
 		if err := file.checkDiskSpace(); err != nil {
 			return err
 		}
 
+		// createStagingFile does nothing while the file has a proxy. The read
+		// only one is shared by every handle of the file, so it is put back if
+		// the staging copy cannot be made: the file stays readable and a later
+		// write tries the switch again.
+		file.fileProxy = nil
 		stagingFile, err := file.createStagingFile("Open", true)
 		if err != nil {
+			file.fileProxy = remoteROFileProxy
 			return err
 		}
 
+		remoteROFileProxy.hdfsReader.Close() // close this read only handle
 		file.fileProxy = &LocalRWFileProxy{localFile: stagingFile, file: file}
 		logger.Info("Open handle upgrade to support RW ", file.logInfo(logger.Fields{Operation: operation}))
 		return nil

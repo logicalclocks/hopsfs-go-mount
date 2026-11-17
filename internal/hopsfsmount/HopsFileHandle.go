@@ -106,8 +106,13 @@ func (fh *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *f
 	fh.File.lockData()
 	defer fh.File.unlockData()
 
-	// as an optimization the file is initially opened in readonly mode
-	fh.File.upgradeHandleForWriting(fh, Write)
+	// as an optimization the file is initially opened in readonly mode. A
+	// failed upgrade leaves the read only proxy, whose WriteAt is fatal, so
+	// its error must go back to the caller instead of into WriteAt.
+	if err := fh.File.upgradeHandleForWriting(fh, Write); err != nil {
+		logger.Error("Failed to upgrade file handle for writing", fh.logInfo(logger.Fields{Operation: Write, Error: err}))
+		return err
+	}
 
 	nw, err := fh.File.fileProxy.WriteAt(req.Data, req.Offset)
 	resp.Size = nw
@@ -169,6 +174,22 @@ func (fh *FileHandle) Release(_ context.Context, _ *fuse.ReleaseRequest) error {
 
 	logger.Info("Closed file handle ", fh.logInfo(logger.Fields{Operation: Close, Flags: fh.fileFlags, TotalBytesRead: fh.tatalBytesRead, TotalBytesWritten: fh.totalBytesWritten}))
 	return nil
+}
+
+// abandon closes a handle the kernel never received, after a failed CREATE,
+// for which neither FLUSH nor RELEASE will come. A new file's DFS writer is
+// closed here too, since only Flush closes it otherwise and it holds the
+// file's lease.
+func (fh *FileHandle) abandon(ctx context.Context) {
+	fh.File.lockData()
+	if w := fh.File.pendingDFSWriter; w != nil {
+		fh.File.pendingDFSWriter = nil
+		if err := w.Close(); err != nil {
+			logger.Error("Failed to close the DFS writer of a failed create", fh.logInfo(logger.Fields{Operation: Create, Error: err}))
+		}
+	}
+	fh.File.unlockData()
+	fh.Release(ctx, nil)
 }
 
 func (fh *FileHandle) Poll(ctx context.Context, req *fuse.PollRequest, resp *fuse.PollResponse) error {

@@ -14,7 +14,7 @@ func TestVirtualRootMergesConfiguredPaths(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	mockClock := &MockClock{}
 	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
-	hdfsAccessor.EXPECT().IsAvailable().Return(true).AnyTimes()
+	hdfsAccessor.EXPECT().TryReserve().Return(true).AnyTimes()
 	hdfsAccessor.EXPECT().Stat("/Projects/current-project").Return(Attrs{
 		Name: "current-project",
 		Mode: os.ModeDir | 0770,
@@ -87,7 +87,7 @@ func TestMultipleVirtualRootsAreMergedAtRoot(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	mockClock := &MockClock{}
 	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
-	hdfsAccessor.EXPECT().IsAvailable().Return(true).AnyTimes()
+	hdfsAccessor.EXPECT().TryReserve().Return(true).AnyTimes()
 	hdfsAccessor.EXPECT().Stat("/Projects/current-project").Return(Attrs{
 		Name: "current-project",
 		Mode: os.ModeDir | 0770,
@@ -162,7 +162,7 @@ func TestVirtualRootIsDisabledWithoutConfiguration(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	mockClock := &MockClock{}
 	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
-	hdfsAccessor.EXPECT().IsAvailable().Return(true).AnyTimes()
+	hdfsAccessor.EXPECT().TryReserve().Return(true).AnyTimes()
 
 	fs, _ := NewFileSystem(
 		[]HdfsAccessor{hdfsAccessor},
@@ -251,7 +251,7 @@ func TestVirtualRootCollisionPrefersBackendEntry(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	mockClock := &MockClock{}
 	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
-	hdfsAccessor.EXPECT().IsAvailable().Return(true).AnyTimes()
+	hdfsAccessor.EXPECT().TryReserve().Return(true).AnyTimes()
 
 	fs, _ := NewFileSystem(
 		[]HdfsAccessor{hdfsAccessor},
@@ -307,7 +307,7 @@ func TestVirtualDirectoryMetadataIsCached(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	mockClock := &MockClock{}
 	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
-	hdfsAccessor.EXPECT().IsAvailable().Return(true).AnyTimes()
+	hdfsAccessor.EXPECT().TryReserve().Return(true).AnyTimes()
 
 	fs, _ := NewFileSystem(
 		[]HdfsAccessor{hdfsAccessor},
@@ -359,7 +359,7 @@ func TestVirtualDirectoryMutationsOutsideConfiguredLeavesAreRejected(t *testing.
 	mockCtrl := gomock.NewController(t)
 	mockClock := &MockClock{}
 	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
-	hdfsAccessor.EXPECT().IsAvailable().Return(true).AnyTimes()
+	hdfsAccessor.EXPECT().TryReserve().Return(true).AnyTimes()
 
 	fs, _ := NewFileSystem(
 		[]HdfsAccessor{hdfsAccessor},
@@ -395,7 +395,7 @@ func TestVirtualDirectoryRenameWithinConfiguredLeafPath(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	mockClock := &MockClock{}
 	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
-	hdfsAccessor.EXPECT().IsAvailable().Return(true).AnyTimes()
+	hdfsAccessor.EXPECT().TryReserve().Return(true).AnyTimes()
 
 	fs, _ := NewFileSystem(
 		[]HdfsAccessor{hdfsAccessor},
@@ -473,7 +473,7 @@ func TestVirtualRootReadDirDoesNotAbortOnMissingBranchMetadata(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	mockClock := &MockClock{}
 	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
-	hdfsAccessor.EXPECT().IsAvailable().Return(true).AnyTimes()
+	hdfsAccessor.EXPECT().TryReserve().Return(true).AnyTimes()
 
 	fs, _ := NewFileSystem(
 		[]HdfsAccessor{hdfsAccessor},
