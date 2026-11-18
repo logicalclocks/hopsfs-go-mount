@@ -49,6 +49,8 @@ Options:
         Log file path. By default the log is written to console
   -logLevel string
         logs to be printed. error, warn, info, debug, trace (default "info")
+  -maxReadaheadKb int
+        Largest kernel readahead in KiB the mount accepts. The kernel keeps the lower of this and the mount's readahead when the mount starts, 128 KiB unless raised before then (the HopsFS CSI driver's readAheadKb) (default 64)
   -numConnections int
         Number of connections with the namenode (default 1)
   -numExtraConnections int

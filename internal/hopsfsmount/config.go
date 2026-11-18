@@ -40,6 +40,7 @@ var UseGroupFromHopsFsDatasetPath bool = false
 var AllowOther bool = false
 var HopfsProjectDatasetGroupRegex = regexp.MustCompile(`/*Projects/(?P<projectName>\w+)/(?P<datasetName>\w+)/\/*`)
 var EnablePageCache = false
+var MaxReadaheadKb = 64
 var EnableDefaultPermissions = true
 var CacheAttrsTimeSecs = 5
 var FallBackUser = "root"
@@ -84,6 +85,7 @@ func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	flag.StringVar(&VirtualDirectoriesSpec, "virtualDirectories", "", "Virtual directory specs exposed at the mount root. Either a semicolon-separated compact form (<name>:<backend-root>:<backend-dirs>;<name>:<backend-root>:<backend-dirs>...) or a JSON array of {name,paths,backendRoot} objects. Example: shared-datasets:/Projects:projectA/datasetA,projectB/datasetB")
 	flag.BoolVar(&Version, "version", false, "Print version")
 	flag.BoolVar(&EnablePageCache, "enablePageCache", false, "Enable Linux Page Cache")
+	flag.IntVar(&MaxReadaheadKb, "maxReadaheadKb", 64, "Largest kernel readahead in KiB the mount accepts. The kernel keeps the lower of this and the mount's readahead when the mount starts, 128 KiB unless raised before then (the HopsFS CSI driver's readAheadKb)")
 	flag.BoolVar(&EnableDefaultPermissions, "enableDefaultPermissions", true, "Enable FUSE default_permissions option. If disabled, permissions are not checked by kernel and only checked on server side")
 	flag.IntVar(&CacheAttrsTimeSecs, "cacheAttrsTimeSecs", 5, "Cache INodes' Attrs. Set to 0 to disable caching INode attrs.")
 	flag.StringVar(&FallBackUser, "fallBackUser", "root", "Local user name if the DFS user is not found on the local file system")
@@ -125,6 +127,10 @@ func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 
 	if ExtraConnectors < 0 {
 		log.Fatalf("Invalid config. numExtraConnections can not be negative")
+	}
+
+	if err := validateMaxReadaheadKb(MaxReadaheadKb); err != nil {
+		log.Fatalf("Invalid config. %v", err)
 	}
 
 	_, err := ValidateUmask(UserUmask)
@@ -217,7 +223,7 @@ func usage() {
 func GetMountOptions(ro bool) []fuse.MountOption {
 	mountOptions := []fuse.MountOption{fuse.FSName("hopsfs"),
 		fuse.Subtype("hopsfs"),
-		fuse.MaxReadahead(1024 * 64), //TODO: make configurable
+		fuse.MaxReadahead(uint32(MaxReadaheadKb) * 1024),
 	}
 
 	if EnableDefaultPermissions {
@@ -239,6 +245,17 @@ func GetMountOptions(ro bool) []fuse.MountOption {
 		mountOptions = append(mountOptions, fuse.ReadOnly())
 	}
 	return mountOptions
+}
+
+// maxReadaheadKbLimit bounds -maxReadaheadKb (1 GiB), to reject a value in
+// the wrong unit rather than advertise it to the kernel.
+const maxReadaheadKbLimit = 1 << 20
+
+func validateMaxReadaheadKb(kb int) error {
+	if kb < 0 || kb > maxReadaheadKbLimit {
+		return fmt.Errorf("maxReadaheadKb must be between 0 and %d, got %d", maxReadaheadKbLimit, kb)
+	}
+	return nil
 }
 
 func validateFallBackUserAndGroup() error {
