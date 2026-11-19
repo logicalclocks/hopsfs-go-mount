@@ -55,6 +55,10 @@ var StagingCacheDiskUsageCheckInterval time.Duration = 1 * time.Second
 var StagingCacheStatsReportingInterval time.Duration = 0
 var NameNodeDialTimeout time.Duration = 30 * time.Second
 var NameNodeTCPUserTimeout time.Duration = 30 * time.Second
+var MaxReadaheadKb int = 64
+
+// 1 GiB: in bytes it still fits the uint32 that FUSE_INIT carries.
+const maxReadaheadKbLimit = 1024 * 1024
 
 func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	flag.BoolVar(&LazyMount, "lazy", false, "Allows to mount HopsFS filesystem before HopsFS is available")
@@ -95,6 +99,7 @@ func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	flag.IntVar(&StagingCacheMaxEntries, "stagingCacheMaxEntries", 10240, "Max staging files to cache locally (0 to disable)")
 	flag.DurationVar(&StagingCacheDiskUsageCheckInterval, "stagingCacheDiskCheckInterval", 1*time.Second, "Interval for checking disk usage for cache eviction (default: 1s)")
 	flag.DurationVar(&StagingCacheStatsReportingInterval, "stagingCacheStatsReportingInterval", 0, "Interval for cache hit ratio reporting (0 to disable, e.g., 1m for every minute)")
+	flag.IntVar(&MaxReadaheadKb, "maxReadaheadKb", 64, "Largest kernel readahead, in KiB, the mount accepts (1-1048576). The kernel uses the lower of this and the mount's read_ahead_kb, so a readahead above the kernel default must also be written to /sys/class/bdi/<major>:<minor>/read_ahead_kb before the mount is served")
 
 	flag.Usage = usage
 	flag.Parse()
@@ -125,6 +130,10 @@ func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 
 	if ExtraConnectors < 0 {
 		log.Fatalf("Invalid config. numExtraConnections can not be negative")
+	}
+
+	if err := validateMaxReadaheadKb(MaxReadaheadKb); err != nil {
+		log.Fatalf("Invalid config. %v", err)
 	}
 
 	_, err := ValidateUmask(UserUmask)
@@ -217,7 +226,7 @@ func usage() {
 func GetMountOptions(ro bool) []fuse.MountOption {
 	mountOptions := []fuse.MountOption{fuse.FSName("hopsfs"),
 		fuse.Subtype("hopsfs"),
-		fuse.MaxReadahead(1024 * 64), //TODO: make configurable
+		fuse.MaxReadahead(uint32(MaxReadaheadKb) * 1024),
 	}
 
 	if EnableDefaultPermissions {
@@ -239,6 +248,13 @@ func GetMountOptions(ro bool) []fuse.MountOption {
 		mountOptions = append(mountOptions, fuse.ReadOnly())
 	}
 	return mountOptions
+}
+
+func validateMaxReadaheadKb(kb int) error {
+	if kb < 1 || kb > maxReadaheadKbLimit {
+		return fmt.Errorf("maxReadaheadKb must be between 1 and %d, got %d", maxReadaheadKbLimit, kb)
+	}
+	return nil
 }
 
 func validateFallBackUserAndGroup() error {
