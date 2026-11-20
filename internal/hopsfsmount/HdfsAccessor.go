@@ -121,6 +121,7 @@ func (dfs *HdfsAccessorImpl) connectToNameNodeImpl() (*hdfs.Client, error) {
 		User:      hadoopUserName,
 		NamenodeDialTimeout:    NameNodeDialTimeout,
 		NamenodeTCPUserTimeout: NameNodeTCPUserTimeout,
+		NamenodeRetryBudget:    clientRetryBudget(NameNodeRetryBudget),
 	}
 
 	if dfs.TLSConfig.TLS {
@@ -636,4 +637,16 @@ func InitConnectionUser() error {
 	hadoopUserID = ugcache.LookupUId(hadoopUserName)
 	logger.Info(fmt.Sprintf("Initialized connection user: %s UID: %d", hadoopUserName, hadoopUserID), nil)
 	return nil
+}
+
+// The client reads a zero budget as its own retry counts and a negative one as
+// no retry; the flag reads the other way round, so 0 means none.
+func clientRetryBudget(flagValue time.Duration) time.Duration {
+	switch {
+	case flagValue < 0:
+		return 0
+	case flagValue == 0:
+		return -1
+	}
+	return flagValue
 }

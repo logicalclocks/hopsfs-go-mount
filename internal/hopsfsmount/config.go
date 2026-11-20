@@ -55,6 +55,7 @@ var StagingCacheDiskUsageCheckInterval time.Duration = 1 * time.Second
 var StagingCacheStatsReportingInterval time.Duration = 0
 var NameNodeDialTimeout time.Duration = 30 * time.Second
 var NameNodeTCPUserTimeout time.Duration = 30 * time.Second
+var NameNodeRetryBudget time.Duration = -1
 
 func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	flag.BoolVar(&LazyMount, "lazy", false, "Allows to mount HopsFS filesystem before HopsFS is available")
@@ -77,6 +78,7 @@ func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	flag.IntVar(&ExtraConnectors, "numExtraConnections", 20, "Connections added on demand, on top of numConnections, while every connection is busy; a request under a subtree operation keeps its connection busy for as long as the operation runs. An added connection stays open until the mount exits. 0 disables")
 	flag.DurationVar(&NameNodeDialTimeout, "namenodeDialTimeout", 30*time.Second, "Time limit for establishing a connection to the namenode, including the TLS handshake. Negative disables the limit")
 	flag.DurationVar(&NameNodeTCPUserTimeout, "namenodeTcpUserTimeout", 30*time.Second, "TCP_USER_TIMEOUT for namenode connections: how long sent data may stay unacknowledged before the connection is declared dead. Negative disables it")
+	flag.DurationVar(&NameNodeRetryBudget, "namenodeRetryBudget", -1, "Time one namenode call may spend in the client's own waits on a RetriableException (a subtree lock, a namenode not started). Negative keeps the client's retry counts; 0 returns the refusal at once, to the mount's retry policy (-retryMaxAttempts, -retryTimeLimit)")
 	flag.StringVar(&ForceOverrideUsername, "hopsFSUserName", "", "HopsFS username")
 	flag.StringVar(&ForceOverrideGroupname, "hopsFSGroupName", "", "HopsFS groupname")
 	flag.BoolVar(&UseGroupFromHopsFsDatasetPath, "getGroupFromHopsFSDatasetPath", false, "Get the group from hopsfs dataset path. This will work if a hopsworks project is mounted")
