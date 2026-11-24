@@ -106,6 +106,62 @@ func (dir *DirINode) LookupInt(opName string, name string) (fs.Node, error) {
 	return node, nil
 }
 
+var _ fs.HandleReadDirPlusAller = (*DirINode)(nil)
+
+// LookupPlus answers READDIRPLUS for name from the child's cached
+// attributes, normally the ones the listing just wrote, never from the
+// NameNode: an entry it cannot answer at once goes without attributes, and
+// the kernel looks it up as before. childrenMutex is held until the
+// attributes are copied, since a listing writes a child's Attrs under it and
+// the parent's dirMutex, never under the child's own locks; those, which a
+// stat or an open can hold across a NameNode call, are only tried. A flush
+// or a truncate writes the size under none of these locks, and races Attr
+// the same way (HOPSFS-463).
+func (dir *DirINode) LookupPlus(ctx context.Context, name string, attr *fuse.Attr) (fs.Node, bool) {
+	dir.lockChildrenMutex()
+	defer dir.unlockChildrenMutex()
+
+	switch child := dir.children[name].(type) {
+	case *FileINode:
+		if !child.fileMutex.TryLock() {
+			return nil, false
+		}
+		defer child.unlockFile()
+		if !child.fileHandleMutex.TryLock() {
+			return nil, false
+		}
+		attrs := child.Attrs
+		// As in FileINode.Attr, a file with a local staging file (written, or read into the staging
+		// cache) reports that file's size and mtime.
+		if proxy, staged := child.fileProxy.(*LocalRWFileProxy); staged {
+			info, err := proxy.localFile.Stat()
+			child.unlockFileHandles()
+			if err != nil {
+				return nil, false
+			}
+			attrs.Size = uint64(info.Size())
+			attrs.Mtime = info.ModTime()
+			return child, attrs.ConvertAttrToFuse(attr) == nil
+		}
+		child.unlockFileHandles()
+		if dir.FileSystem.Clock.Now().After(attrs.Expires) {
+			return nil, false
+		}
+		return child, attrs.ConvertAttrToFuse(attr) == nil
+	case *DirINode:
+		if !child.dirMutex.TryLock() {
+			return nil, false
+		}
+		defer child.unlockMutex()
+		attrs := child.Attrs
+		if dir.FileSystem.Clock.Now().After(attrs.Expires) {
+			return nil, false
+		}
+		return child, attrs.ConvertAttrToFuse(attr) == nil
+	}
+	return nil, false
+}
+
 // Responds on FUSE request to read directory.
 func (dir *DirINode) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 	dir.lockMutex()

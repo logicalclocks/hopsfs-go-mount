@@ -441,3 +441,127 @@ func TestSetattr(t *testing.T) {
 	assert.Nil(t, err)
 	assert.Equal(t, uint32(0), node.(*DirINode).Attrs.Uid)
 }
+
+// newLookupPlusTestRoot lists listing at / through a mock accessor that
+// expects no other call, so a LookupPlus that reached the NameNode fails the
+// test. A test that lists again adds its own expectation.
+func newLookupPlusTestRoot(t *testing.T, allowedPrefixes []string, listing []Attrs) (*DirINode, *MockClock, *MockHdfsAccessor) {
+	mockCtrl := gomock.NewController(t)
+	mockClock := &MockClock{}
+	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
+	hdfsAccessor.EXPECT().TryReserve().Return(true).AnyTimes()
+	fs, _ := NewFileSystem([]HdfsAccessor{hdfsAccessor}, "/", allowedPrefixes, false, DelaySyncUntilClose, NewDefaultRetryPolicy(mockClock), mockClock)
+	root, _ := fs.Root()
+	hdfsAccessor.EXPECT().ReadDir("/").Return(listing, nil)
+	if _, err := root.(*DirINode).ReadDirAll(nil); err != nil {
+		t.Fatal(err)
+	}
+	return root.(*DirINode), mockClock, hdfsAccessor
+}
+
+var lookupPlusTestListing = []Attrs{
+	{Name: "dir1", Mode: os.ModeDir | 0755},
+	{Name: "file1", Mode: 0644, Size: 1},
+}
+
+func TestLookupPlusNeverCallsBackend(t *testing.T) {
+	root, mockClock, _ := newLookupPlusTestRoot(t, []string{"*"}, lookupPlusTestListing)
+	var attr fuse.Attr
+	_, ok := root.LookupPlus(nil, "dir1", &attr)
+	assert.True(t, ok)
+	assert.Equal(t, os.ModeDir|0755, attr.Mode)
+	file, ok := root.LookupPlus(nil, "file1", &attr)
+	assert.True(t, ok)
+	assert.Equal(t, os.FileMode(0644), attr.Mode)
+	assert.Equal(t, uint64(1), attr.Size)
+
+	// Expired listing attributes are not answered: the kernel looks the names up.
+	mockClock.NotifyTimeElapsed(CacheListingAttrsDuration + time.Second)
+	_, ok = root.LookupPlus(nil, "dir1", &attr)
+	assert.False(t, ok)
+	_, ok = root.LookupPlus(nil, "file1", &attr)
+	assert.False(t, ok)
+
+	// An open file reports its staging file's size, as Attr does, however old the listing.
+	staging, err := os.CreateTemp(t.TempDir(), "staging")
+	assert.Nil(t, err)
+	_, err = staging.Write([]byte("12345"))
+	assert.Nil(t, err)
+	fileNode := file.(*FileINode)
+	fileNode.fileProxy = &LocalRWFileProxy{localFile: staging, file: fileNode}
+	got, ok := root.LookupPlus(nil, "file1", &attr)
+	assert.True(t, ok)
+	assert.Equal(t, file, got)
+	assert.Equal(t, uint64(5), attr.Size)
+
+	// A staging file whose stat fails (the test closes it) is not answered.
+	assert.Nil(t, staging.Close())
+	_, ok = root.LookupPlus(nil, "file1", &attr)
+	assert.False(t, ok)
+}
+
+func TestLookupPlusUnlistedOrFilteredName(t *testing.T) {
+	root, _, _ := newLookupPlusTestRoot(t, []string{"foo"}, []Attrs{
+		{Name: "foo", Mode: 0644, Size: 1},
+		{Name: "bar", Mode: 0644, Size: 1},
+	})
+	var attr fuse.Attr
+	_, ok := root.LookupPlus(nil, "foo", &attr)
+	assert.True(t, ok)
+	_, ok = root.LookupPlus(nil, "bar", &attr)
+	assert.False(t, ok, "a name -allowedPrefixes filters out is not answered")
+	_, ok = root.LookupPlus(nil, "never-listed", &attr)
+	assert.False(t, ok)
+}
+
+// A child whose lock is held, as during a stat or an open that may wait on
+// the NameNode, is not answered rather than waited for.
+func TestLookupPlusBusyChildReturnsNoAttrs(t *testing.T) {
+	root, _, _ := newLookupPlusTestRoot(t, []string{"*"}, lookupPlusTestListing)
+	dir, _ := root.Lookup(nil, "dir1")
+	file, _ := root.Lookup(nil, "file1")
+	var attr fuse.Attr
+
+	dir.(*DirINode).dirMutex.Lock()
+	_, ok := root.LookupPlus(nil, "dir1", &attr)
+	assert.False(t, ok)
+	dir.(*DirINode).dirMutex.Unlock()
+
+	file.(*FileINode).fileMutex.Lock()
+	_, ok = root.LookupPlus(nil, "file1", &attr)
+	assert.False(t, ok)
+	file.(*FileINode).fileMutex.Unlock()
+
+	file.(*FileINode).fileHandleMutex.Lock()
+	_, ok = root.LookupPlus(nil, "file1", &attr)
+	assert.False(t, ok)
+	file.(*FileINode).fileHandleMutex.Unlock()
+
+	_, ok = root.LookupPlus(nil, "dir1", &attr)
+	assert.True(t, ok)
+	_, ok = root.LookupPlus(nil, "file1", &attr)
+	assert.True(t, ok)
+}
+
+// A listing rewrites a child's Attrs while LookupPlus copies them. Run with
+// -race: both sides must hold the parent's childrenMutex.
+func TestLookupPlusConcurrentListing(t *testing.T) {
+	root, _, hdfsAccessor := newLookupPlusTestRoot(t, []string{"*"}, lookupPlusTestListing)
+	hdfsAccessor.EXPECT().ReadDir("/").Return(lookupPlusTestListing, nil).AnyTimes()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 500; i++ {
+			if _, err := root.ReadDirAll(nil); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	var attr fuse.Attr
+	for i := 0; i < 500; i++ {
+		root.LookupPlus(nil, "file1", &attr)
+		root.LookupPlus(nil, "dir1", &attr)
+	}
+	<-done
+}

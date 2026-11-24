@@ -227,6 +227,7 @@ func GetMountOptions(ro bool) []fuse.MountOption {
 	mountOptions := []fuse.MountOption{fuse.FSName("hopsfs"),
 		fuse.Subtype("hopsfs"),
 		fuse.MaxReadahead(1024 * 64), //TODO: make configurable
+		fuse.ReaddirPlus(),
 	}
 
 	if EnableDefaultPermissions {
