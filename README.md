@@ -49,8 +49,8 @@ Options:
         Log file path. By default the log is written to console
   -logLevel string
         logs to be printed. error, warn, info, debug, trace (default "info")
-  -maxReadaheadKb int
-        Largest kernel readahead, in KiB, the mount accepts (1-1048576). The kernel uses the lower of this and the mount's read_ahead_kb, so a readahead above the kernel default must also be written to /sys/class/bdi/<major>:<minor>/read_ahead_kb before the mount is served (default 64)
+  -maxReadaheadBytes int
+        Largest kernel readahead, in bytes, the mount accepts (1-8388608). The kernel uses the lower of this and the mount's read_ahead_kb, so a readahead above the kernel default must also be written to /sys/class/bdi/<major>:<minor>/read_ahead_kb before the mount is served (default 65536)
   -numConnections int
         Number of connections with the namenode (default 1)
   -numExtraConnections int

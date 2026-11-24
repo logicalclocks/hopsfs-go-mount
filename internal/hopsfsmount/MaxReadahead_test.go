@@ -9,27 +9,27 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func TestValidateMaxReadaheadKb(t *testing.T) {
-	for _, kb := range []int{1, 64, 1024, maxReadaheadKbLimit} {
-		if err := validateMaxReadaheadKb(kb); err != nil {
-			t.Errorf("maxReadaheadKb %d should be accepted: %v", kb, err)
+func TestValidateMaxReadaheadBytes(t *testing.T) {
+	for _, bytes := range []int{1, 65536, 1048576, maxReadaheadBytesLimit} {
+		if err := validateMaxReadaheadBytes(bytes); err != nil {
+			t.Errorf("maxReadaheadBytes %d should be accepted: %v", bytes, err)
 		}
 	}
-	for _, kb := range []int{-1, 0, maxReadaheadKbLimit + 1} {
-		if err := validateMaxReadaheadKb(kb); err == nil {
-			t.Errorf("maxReadaheadKb %d should be rejected", kb)
+	for _, bytes := range []int{-1, 0, maxReadaheadBytesLimit + 1} {
+		if err := validateMaxReadaheadBytes(bytes); err == nil {
+			t.Errorf("maxReadaheadBytes %d should be rejected", bytes)
 		}
 	}
 }
 
-func TestMaxReadaheadKbReachesKernel(t *testing.T) {
+func TestMaxReadaheadBytesReachesKernel(t *testing.T) {
 	// Below the kernel's 128 KiB default: FUSE_INIT can only lower the
 	// mount's readahead, so a larger value would not show in read_ahead_kb.
 	const readaheadKb = 32
 
-	previous := MaxReadaheadKb
-	MaxReadaheadKb = readaheadKb
-	defer func() { MaxReadaheadKb = previous }()
+	previous := MaxReadaheadBytes
+	MaxReadaheadBytes = readaheadKb * 1024
+	defer func() { MaxReadaheadBytes = previous }()
 
 	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
 		var stat unix.Stat_t
