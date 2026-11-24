@@ -25,10 +25,10 @@ func TestValidateMaxReadaheadBytes(t *testing.T) {
 func TestMaxReadaheadBytesReachesKernel(t *testing.T) {
 	// Below the kernel's 128 KiB default: FUSE_INIT can only lower the
 	// mount's readahead, so a larger value would not show in read_ahead_kb.
-	const readaheadKb = 32
+	const readaheadBytes = 32 * 1024
 
 	previous := MaxReadaheadBytes
-	MaxReadaheadBytes = readaheadKb * 1024
+	MaxReadaheadBytes = readaheadBytes
 	defer func() { MaxReadaheadBytes = previous }()
 
 	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
@@ -42,8 +42,8 @@ func TestMaxReadaheadBytesReachesKernel(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", bdi, err)
 		}
-		if got := strings.TrimSpace(string(data)); got != fmt.Sprint(readaheadKb) {
-			t.Errorf("%s is %s, want %d", bdi, got, readaheadKb)
+		if got := strings.TrimSpace(string(data)); got != fmt.Sprint(readaheadBytes/1024) {
+			t.Errorf("%s is %s, want %d", bdi, got, readaheadBytes/1024)
 		}
 	})
 }
