@@ -469,7 +469,7 @@ func TestVirtualDirectoryRenameWithinConfiguredLeafPath(t *testing.T) {
 	assert.NotNil(t, renamed)
 }
 
-func TestVirtualRootReadDirDoesNotAbortOnMissingBranchMetadata(t *testing.T) {
+func TestVirtualRootReadDirListsBranchesWithoutBackendCalls(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	mockClock := &MockClock{}
 	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
@@ -504,14 +504,8 @@ func TestVirtualRootReadDirDoesNotAbortOnMissingBranchMetadata(t *testing.T) {
 	sharedRoot, err := root.(*DirINode).Lookup(nil, "shared-datasets")
 	assert.Nil(t, err)
 
-	hdfsAccessor.EXPECT().Stat("/Projects/good-project").Return(Attrs{
-		Name:    "good-project",
-		Mode:    os.ModeDir | 0770,
-		Uid:     333,
-		Gid:     444,
-		Expires: mockClock.Now().Add(CacheAttrsTimeDuration),
-	}, nil)
-	hdfsAccessor.EXPECT().Stat("/Projects/bad-project").Return(Attrs{}, syscall.EACCES)
+	// Listing names the configured branches without creating their nodes, so it
+	// needs no backend call and cannot fail on a branch the user may not stat.
 	dirents, err := sharedRoot.(*VirtualDirINode).ReadDirAll(nil)
 	assert.Nil(t, err)
 	assert.Equal(t, []string{"bad-project", "good-project"}, direntNames(dirents))

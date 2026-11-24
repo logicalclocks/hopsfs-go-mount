@@ -5,6 +5,7 @@
 package hopsfsmount
 
 import (
+	"container/list"
 	"fmt"
 	"io"
 	"math/rand"
@@ -43,6 +44,8 @@ type FileINode struct {
 	FileSystem *FileSystem // pointer to the FieSystem which owns this file
 	Attrs      Attrs       // Cache of file attributes // TODO: implement TTL
 	Parent     Pather      // Pointer to the parent directory (allows computing fully-qualified paths on demand)
+	life       nodeLife
+	evictable  *list.Element // place in fileNodes while the kernel references this node
 
 	activeHandles    []*FileHandle // list of opened file handles
 	fileMutex        sync.Mutex    // mutex for file metadata (Attrs)
@@ -58,7 +61,6 @@ var _ fs.Node = (*FileINode)(nil)
 var _ fs.NodeOpener = (*FileINode)(nil)
 var _ fs.NodeFsyncer = (*FileINode)(nil)
 var _ fs.NodeSetattrer = (*FileINode)(nil)
-var _ fs.NodeForgetter = (*FileINode)(nil)
 
 // Retuns absolute path of the file in HDFS namespace
 func (file *FileINode) AbsolutePath() string {
@@ -91,8 +93,17 @@ func (file *FileINode) Attr(ctx context.Context, a *fuse.Attr) error {
 
 	// No local proxy - use cache or fetch from backend
 	if file.FileSystem.Clock.Now().After(file.Attrs.Expires) {
-		_, err := parentStatInodeInHopsFS(file.Parent, GetattrFile, file.Attrs.Name, &file.Attrs)
+		attrs, err := refreshChildAttrs(file.Parent, GetattrFile, file.Attrs.Name)
+		if err == nil && attrs.Mode.IsDir() {
+			err = syscall.ESTALE
+		}
+		if err == nil {
+			file.Attrs = attrs
+		}
 		if err != nil {
+			if err == syscall.ENOENT || err == syscall.ESTALE {
+				file.life.detach(file)
+			}
 			if err == syscall.ENOENT {
 				// A file this mount knew has gone from the backend: the one
 				// ENOENT on a known file, so it is logged at the default level.
@@ -103,7 +114,9 @@ func (file *FileINode) Attr(ctx context.Context, a *fuse.Attr) error {
 	} else {
 		logger.Info("Stat successful. Returning from Cache ", logger.Fields{Operation: GetattrFile, Path: file.AbsolutePath(), FileSize: file.Attrs.Size, IsDir: file.Attrs.Mode.IsDir(), IsRegular: file.Attrs.Mode.IsRegular()})
 	}
-	return file.Attrs.ConvertAttrToFuse(a)
+	err := file.Attrs.ConvertAttrToFuse(a)
+	a.Valid = file.Attrs.validFor(file.FileSystem.Clock.Now())
+	return err
 }
 
 // Responds to the FUSE file open request (creates new file handle)
@@ -361,6 +374,7 @@ func (file *FileINode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error 
 func (file *FileINode) InvalidateMetadataCache() {
 	logger.Debug("InvalidateMetadataCache ", file.logInfo(logger.Fields{}))
 	file.Attrs.Expires = file.FileSystem.Clock.Now().Add(-1 * time.Second)
+	file.life.invalidateListing()
 }
 
 // Responds on FUSE Chmod request
@@ -394,6 +408,7 @@ func (file *FileINode) Setattr(ctx context.Context, req *fuse.SetattrRequest, re
 	defer file.unlockFile()
 
 	path := file.AbsolutePath()
+	file.life.invalidateListing()
 
 	if req.Valid.Mode() {
 		if err := ChmodOp(&file.Attrs, file.FileSystem, path, req, resp); err != nil {
@@ -412,17 +427,6 @@ func (file *FileINode) Setattr(ctx context.Context, req *fuse.SetattrRequest, re
 	}
 
 	return nil
-}
-
-// Responds on FUSE request to forget inode
-// Lock order: fileMutex (2) alone
-func (file *FileINode) Forget() {
-	file.lockFile()
-	defer file.unlockFile()
-	// see comment in Dir.go for Forget handler
-	// ask parent to remove me from the children list
-	// logger.Debug(fmt.Sprintf("Forget for file %s", file.Attrs.Name), nil)
-	// file.Parent.removeChildInode(Forget, file.Attrs.Name)
 }
 
 // Lock order: fileHandleMutex (1) alone

@@ -35,7 +35,7 @@ func TestAttrWarnsWhenAKnownFileIsGoneFromTheBackend(t *testing.T) {
 	hdfsAccessor.EXPECT().TryReserve().Return(true).AnyTimes()
 	fs, _ := NewFileSystem([]HdfsAccessor{hdfsAccessor}, "/", []string{"*"}, false, DelaySyncUntilClose, NewDefaultRetryPolicy(mockClock), mockClock)
 	root, _ := fs.Root()
-	file := root.(*DirINode).addOrUpdateChildInodeAttrs("unit_test", "gone", Attrs{Name: "gone", Mode: os.FileMode(0644), Expires: mockClock.Now()}).(*FileINode)
+	file := root.(*DirINode).cacheChildInode(root.(*DirINode), "unit_test", "gone", Attrs{Name: "gone", Mode: os.FileMode(0644), Expires: mockClock.Now()}, false).(*FileINode)
 	mockClock.NotifyTimeElapsed(time.Second)
 
 	hdfsAccessor.EXPECT().Stat("/gone").Return(Attrs{}, syscall.ENOENT)
@@ -100,7 +100,7 @@ func TestOpenThroughTheStagingCacheTakesOneConnector(t *testing.T) {
 	fs, _ := NewFileSystem([]HdfsAccessor{connector}, "/", []string{"*"}, false, DelaySyncUntilClose, NewDefaultRetryPolicy(mockClock), mockClock,
 		failOnExtraConnector(t, mockCtrl))
 	root, _ := fs.Root()
-	file := root.(*DirINode).addOrUpdateChildInodeAttrs("unit_test", "cached", Attrs{Name: "cached", Mode: os.FileMode(0644), Size: 5}).(*FileINode)
+	file := root.(*DirINode).cacheChildInode(root.(*DirINode), "unit_test", "cached", Attrs{Name: "cached", Mode: os.FileMode(0644), Size: 5}, false).(*FileINode)
 
 	h, err := file.Open(nil, &fuse.OpenRequest{Flags: fuse.OpenReadOnly}, &fuse.OpenResponse{})
 	assert.Nil(t, err)

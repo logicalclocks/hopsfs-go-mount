@@ -143,7 +143,7 @@ func openExistingFileReadOnly(t *testing.T, name string) (*FileHandle, *MockHdfs
 	hdfsAccessor.EXPECT().TryReserve().Return(true).AnyTimes()
 	fs, _ := NewFileSystem([]HdfsAccessor{hdfsAccessor}, "/", []string{"*"}, false, DelaySyncUntilClose, NewDefaultRetryPolicy(mockClock), mockClock)
 	root, _ := fs.Root()
-	file := root.(*DirINode).addOrUpdateChildInodeAttrs("unit_test", name, Attrs{Name: name, Mode: os.FileMode(0644)}).(*FileINode)
+	file := root.(*DirINode).cacheChildInode(root.(*DirINode), "unit_test", name, Attrs{Name: name, Mode: os.FileMode(0644)}, false).(*FileINode)
 
 	reader := &MockReadSeekCloserWithPseudoRandomContent{FileSize: 5, ReaderStats: &ReaderStats{}}
 	hdfsAccessor.EXPECT().OpenRead("/"+name).Return(reader, nil)
@@ -275,7 +275,7 @@ func TestFlushFile(t *testing.T) {
 
 	// Test for newfilehandlewriter with existing file
 	root, _ := fs.Root()
-	file := (root.(*DirINode).addOrUpdateChildInodeAttrs("unit_test", "testWriteFile_2", Attrs{Name: "testWriteFile_2", Mode: os.FileMode(0757)})).(*FileINode)
+	file := root.(*DirINode).cacheChildInode(root.(*DirINode), "unit_test", "testWriteFile_2", Attrs{Name: "testWriteFile_2", Mode: os.FileMode(0757)}, false).(*FileINode)
 	fh, _ := file.Open(nil, &fuse.OpenRequest{}, &fuse.OpenResponse{})
 	fileHandle := fh.(*FileHandle)
 

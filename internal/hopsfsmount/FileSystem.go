@@ -20,6 +20,7 @@ import (
 	"os/exec"
 	"os/user"
 	"sync"
+	"sync/atomic"
 )
 
 type FileSystem struct {
@@ -37,6 +38,11 @@ type FileSystem struct {
 	RetryPolicy         *RetryPolicy             // Retry policy for failed backend operations
 	Clock               Clock                    // interface to get wall clock time
 	FsInfo              FsInfo                   // Usage of HDFS, including capacity, remaining, used sizes.
+
+	listings        *listingCache // attributes of listed entries, shared by all directories
+	negativeEntries atomic.Int64  // names in the negative caches of all directories
+	fileNodes       registeredFiles
+	evicting        evictionInFlight
 
 	closeOnUnmount            []io.Closer     // list of opened files (zip archives) to be closed on unmount
 	closeOnUnmountLock        sync.Mutex      // mutex to protect closeOnUnmount
@@ -58,7 +64,8 @@ func NewFileSystem(hdfsAccessors []HdfsAccessor, srcDir string, allowedPrefixes 
 		DelaySyncUntilClose: delaySyncUntilClose,
 		RetryPolicy:         retryPolicy,
 		Clock:               clock,
-		SrcDir:              srcDir}
+		SrcDir:              srcDir,
+		listings:            newListingCache(int64(ListingCacheMB) << 20)}
 	for _, opt := range opts {
 		if opt == nil {
 			continue

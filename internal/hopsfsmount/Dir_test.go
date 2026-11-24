@@ -240,7 +240,7 @@ func TestCreateOfANewFileClosesItsWriterWhenTheFinalStatFails(t *testing.T) {
 	hdfsAccessor.EXPECT().TryReserve().Return(true).AnyTimes()
 	fs, _ := NewFileSystem([]HdfsAccessor{hdfsAccessor}, "/", []string{"*"}, false, DelaySyncUntilClose, NewDefaultRetryPolicy(mockClock), mockClock)
 	root, _ := fs.Root()
-	file := root.(*DirINode).addOrUpdateChildInodeAttrs("unit_test", "newfile", Attrs{Name: "newfile", Mode: os.FileMode(0644)}).(*FileINode)
+	file := root.(*DirINode).cacheChildInode(root.(*DirINode), "unit_test", "newfile", Attrs{Name: "newfile", Mode: os.FileMode(0644)}, false).(*FileINode)
 
 	hdfswriter := NewMockHdfsWriter(mockCtrl)
 	hdfswriter.EXPECT().Close().Return(nil)
@@ -292,7 +292,7 @@ func TestNegativeCacheInvalidatedByRename(t *testing.T) {
 
 	// Create a source file in the children cache
 	rootDir := root.(*DirINode)
-	rootDir.addOrUpdateChildInodeAttrs("test", "srcfile", Attrs{Name: "srcfile", Mode: 0644})
+	rootDir.cacheChildInode(rootDir, "test", "srcfile", Attrs{Name: "srcfile", Mode: 0644}, false)
 
 	// Lookup "dstfile" returns ENOENT - populates negative cache
 	hdfsAccessor.EXPECT().Stat("/dstfile").Return(Attrs{}, syscall.ENOENT)

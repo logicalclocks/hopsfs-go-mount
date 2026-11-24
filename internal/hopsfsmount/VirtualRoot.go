@@ -4,7 +4,6 @@ package hopsfsmount
 
 import (
 	"fmt"
-	"os"
 	"path"
 	"syscall"
 
@@ -46,7 +45,6 @@ var _ fs.NodeStringLookuper = (*VirtualDirINode)(nil)
 var _ fs.NodeMkdirer = (*VirtualDirINode)(nil)
 var _ fs.NodeRemover = (*VirtualDirINode)(nil)
 var _ fs.NodeRenamer = (*VirtualDirINode)(nil)
-var _ fs.NodeForgetter = (*VirtualDirINode)(nil)
 var _ fs.NodeSymlinker = (*VirtualDirINode)(nil)
 var _ fs.NodeReadlinker = (*VirtualDirINode)(nil)
 var _ fs.NodeLinker = (*VirtualDirINode)(nil)
@@ -103,12 +101,7 @@ func (dir *VirtualDirINode) ReadDirAll(ctx context.Context) ([]fuse.Dirent, erro
 			continue
 		}
 
-		child, err := dir.ensureSyntheticDirectoryChild(ReadDir, childRelPath, childName, dir.config.Path(childRelPath))
-		if err != nil {
-			entries = append(entries, fuse.Dirent{Inode: syntheticInode(path.Join("/", dir.config.Name, childRelPath)), Name: childName, Type: fuse.DT_Unknown})
-			continue
-		}
-		entries = append(entries, fuse.Dirent{Inode: child.Attrs.Inode, Name: childName, Type: fuse.DT_Dir})
+		entries = append(entries, fuse.Dirent{Inode: syntheticInode(path.Join("/", dir.config.Name, childRelPath)), Name: childName, Type: fuse.DT_Dir})
 	}
 	return entries, nil
 }
@@ -118,7 +111,11 @@ func (dir *VirtualDirINode) Lookup(ctx context.Context, name string) (fs.Node, e
 	dir.lockMutex()
 	defer dir.unlockMutex()
 
-	return dir.lookupVirtualDirectoryChild(Lookup, name)
+	node, err := dir.lookupVirtualDirectoryChild(Lookup, name)
+	if err != nil {
+		return nil, err
+	}
+	return dir.FileSystem.evicting.refuseDirectory(dir, name, node)
 }
 
 // All mutation operations on a synthetic directory return EPERM. The synthetic tree is
@@ -259,7 +256,7 @@ func (dir *VirtualDirINode) statInodeInHopsFS(operation, name string, attrs *Att
 	}
 	*attrs = a
 
-	inode := dir.addOrUpdateChildInodeAttrs(operation, name, *attrs)
+	inode := dir.cacheChildInode(dir, operation, name, *attrs, false)
 	logger.Info("Stat successful on backend", logger.Fields{Operation: operation, Path: path.Join(dir.AbsolutePath(), name), FileSize: attrs.Size,
 		IsDir: attrs.Mode.IsDir(), IsRegular: attrs.Mode.IsRegular()})
 	return inode, nil
@@ -291,49 +288,6 @@ func (dir *VirtualDirINode) refreshSyntheticAttrs() error {
 func (dir *VirtualDirINode) rejectMutation(operation, candidatePath string) error {
 	logger.Warn("Rejected mutation outside configured virtual tree", logger.Fields{Operation: operation, Path: candidatePath})
 	return syscall.EPERM
-}
-
-// addOrUpdateChildInodeAttrs caches a child inode under name. New real-backed children
-// are wired with dir as their Parent so AbsolutePath() walks up through the synthetic
-// chain to the correct backend path.
-func (dir *VirtualDirINode) addOrUpdateChildInodeAttrs(operation, name string, attrs Attrs) fs.Node {
-	dir.lockChildrenMutex()
-	defer dir.unlockChildrenMutex()
-
-	if dir.children == nil {
-		dir.children = make(map[string]fs.Node)
-	}
-
-	shouldBeDir := (attrs.Mode & os.ModeDir) != 0
-	if node, ok := dir.children[name]; ok {
-		if shouldBeDir {
-			if dnode, ok := (node).(*DirINode); ok {
-				dnode.Attrs = attrs
-				logger.Debug("Children's List. addOrUpdateChildInodeAttrs. Update ", logger.Fields{Operation: operation, Child: name, NumChildren: len(dir.children)})
-				return node
-			}
-			node = newDirINode(dir.FileSystem, dir, attrs)
-		} else {
-			if fnode, ok := (node).(*FileINode); ok {
-				fnode.Attrs = attrs
-				logger.Debug("Children's List. addOrUpdateChildInodeAttrs. Update ", logger.Fields{Operation: operation, Child: name, NumChildren: len(dir.children)})
-				return node
-			}
-			node = &FileINode{FileSystem: dir.FileSystem, Parent: dir, Attrs: attrs}
-		}
-		dir.children[name] = node
-		logger.Debug("Children's List. addOrUpdateChildInodeAttrs. Replace ", logger.Fields{Operation: operation, Child: name, NumChildren: len(dir.children)})
-		return node
-	}
-	var node fs.Node
-	if shouldBeDir {
-		node = newDirINode(dir.FileSystem, dir, attrs)
-	} else {
-		node = &FileINode{FileSystem: dir.FileSystem, Parent: dir, Attrs: attrs}
-	}
-	dir.children[name] = node
-	logger.Debug("Children's List. addOrUpdateChildInodeAttrs. Add ", logger.Fields{Operation: operation, Child: name, NumChildren: len(dir.children)})
-	return node
 }
 
 // ============================================================================
@@ -381,6 +335,11 @@ func (filesystem *FileSystem) lookupVirtualRoot(dir *DirINode, opName, name stri
 		}
 	}
 
+	// A listing of the mount root already says whether a real entry has this name.
+	if attrs, ok := filesystem.listings.lookup(&dir.baseDirNode, name, now); ok {
+		return dir.cacheChildInode(dir, opName, name, attrs, false), true, nil
+	}
+
 	// Probe the backend for a colliding real entry. We do not call dir.statInodeInHopsFS here:
 	// its side effects (removeChildInode, addNegativeCacheEntry on ENOENT) would destroy the
 	// cached *VirtualDirINode and pollute the negative cache for a name that, by configuration,
@@ -391,7 +350,7 @@ func (filesystem *FileSystem) lookupVirtualRoot(dir *DirINode, opName, name stri
 	if err == nil {
 		// Collision: real backend entry shadows the synthetic. Cache and return the real node.
 		backendAttrs.Name = name
-		realNode := dir.addOrUpdateChildInodeAttrs(opName, name, backendAttrs)
+		realNode := dir.cacheChildInode(dir, opName, name, backendAttrs, false)
 		return realNode, true, nil
 	}
 	if err != syscall.ENOENT {
