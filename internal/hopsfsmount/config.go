@@ -19,6 +19,7 @@ import (
 )
 
 var CacheAttrsTimeDuration = 5 * time.Second
+var CacheListingAttrsDuration = 60 * time.Second
 var StagingDir string = "/tmp"
 var MntSrcDir string = "/"
 var LogFile string = ""
@@ -42,6 +43,7 @@ var HopfsProjectDatasetGroupRegex = regexp.MustCompile(`/*Projects/(?P<projectNa
 var EnablePageCache = false
 var EnableDefaultPermissions = true
 var CacheAttrsTimeSecs = 5
+var CacheListingAttrsSecs = 60
 var FallBackUser = "root"
 var FallBackGroup = "root"
 var VirtualDirectoriesSpec string = ""
@@ -86,6 +88,7 @@ func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	flag.BoolVar(&EnablePageCache, "enablePageCache", false, "Enable Linux Page Cache")
 	flag.BoolVar(&EnableDefaultPermissions, "enableDefaultPermissions", true, "Enable FUSE default_permissions option. If disabled, permissions are not checked by kernel and only checked on server side")
 	flag.IntVar(&CacheAttrsTimeSecs, "cacheAttrsTimeSecs", 5, "Cache INodes' Attrs. Set to 0 to disable caching INode attrs.")
+	flag.IntVar(&CacheListingAttrsSecs, "cacheListingAttrsSecs", 60, "Seconds the attributes from a directory listing stay cached, counted from the end of the listing. Attributes from a stat keep cacheAttrsTimeSecs. The value of cacheAttrsTimeSecs gives the behaviour before this flag; 0 keeps none, so each entry's first stat after a listing goes to the namenode.")
 	flag.StringVar(&FallBackUser, "fallBackUser", "root", "Local user name if the DFS user is not found on the local file system")
 	flag.StringVar(&FallBackGroup, "fallBackGroup", "root", "Local group name if the DFS group is not found on the local file system.")
 	flag.StringVar(&UserUmask, "umask", "", "Umask for the file system. Must be a 4 digit octal number.")
@@ -121,6 +124,12 @@ func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 		log.Fatalf("Invalid config. cacheAttrsTimeSecs can not be negative ")
 	} else {
 		CacheAttrsTimeDuration = time.Second * time.Duration(CacheAttrsTimeSecs)
+	}
+
+	if d, err := listingAttrsDuration(CacheListingAttrsSecs); err != nil {
+		log.Fatalf("Invalid config. %v", err)
+	} else {
+		CacheListingAttrsDuration = d
 	}
 
 	if ExtraConnectors < 0 {
@@ -298,6 +307,13 @@ func ValidateUmask(umask string) (os.FileMode, error) {
 	}
 	Umask = os.FileMode(value)
 	return Umask, nil
+}
+
+func listingAttrsDuration(secs int) (time.Duration, error) {
+	if secs < 0 {
+		return 0, errors.New("cacheListingAttrsSecs can not be negative")
+	}
+	return time.Second * time.Duration(secs), nil
 }
 
 func isNumeric(s string) bool {

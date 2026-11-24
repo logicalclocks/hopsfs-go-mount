@@ -161,6 +161,78 @@ func TestNegativeCacheBackendMkdirIntegration(t *testing.T) {
 	})
 }
 
+// A listing keeps its entries' attributes for cacheListingAttrsSecs. A change
+// made on HopsFS after the listing, bypassing the mount as another client
+// would, shows through the mount once that window and the kernel's copy
+// (cacheAttrsTimeSecs) have expired, not before; a change made through the
+// mount shows at once.
+func TestListingAttrsWindowIntegration(t *testing.T) {
+	origCacheAttrsTimeDuration, origCacheListingAttrsDuration := CacheAttrsTimeDuration, CacheListingAttrsDuration
+	CacheAttrsTimeDuration = 1 * time.Second
+	CacheListingAttrsDuration = 4 * time.Second
+	defer func() {
+		CacheAttrsTimeDuration = origCacheAttrsTimeDuration
+		CacheListingAttrsDuration = origCacheListingAttrsDuration
+	}()
+
+	withMount(t, "/", DelaySyncUntilClose, func(mountPoint string, hdfsAccessor HdfsAccessor) {
+		testDir, hdfsDir := uniqueTestPath(mountPoint, "listing_attrs_window")
+		if err := hdfsAccessor.Mkdir(hdfsDir, os.ModeDir|os.FileMode(0755)); err != nil {
+			t.Fatalf("Backend Mkdir failed: %v", err)
+		}
+		defer hdfsAccessor.Remove(hdfsDir)
+		writeBackend := func(name string, mode os.FileMode, data string) {
+			writer, err := hdfsAccessor.CreateFile(filepath.Join(hdfsDir, name), mode, true)
+			if err != nil {
+				t.Fatalf("Backend CreateFile %s failed: %v", name, err)
+			}
+			if _, err = writer.Write([]byte(data)); err != nil {
+				t.Fatalf("Backend Write %s failed: %v", name, err)
+			}
+			if err = writer.Close(); err != nil {
+				t.Fatalf("Backend Close %s failed: %v", name, err)
+			}
+		}
+		assertStat := func(name string, size int64, mode os.FileMode) {
+			info, err := os.Stat(filepath.Join(testDir, name))
+			if err != nil {
+				t.Fatalf("Stat %s: %v", name, err)
+			}
+			if info.Size() != size || info.Mode().Perm() != mode {
+				t.Fatalf("Stat %s: size %d mode %o, want size %d mode %o", name, info.Size(), info.Mode().Perm(), size, mode)
+			}
+		}
+		writeBackend("changed", 0644, "a")
+		writeBackend("removed", 0644, "a")
+		writeBackend("local", 0644, "a")
+
+		if _, err := os.ReadDir(testDir); err != nil {
+			t.Fatalf("ReadDir: %v", err)
+		}
+		listed := time.Now()
+
+		writeBackend("changed", 0600, "abc")
+		if err := hdfsAccessor.Remove(filepath.Join(hdfsDir, "removed")); err != nil {
+			t.Fatalf("Backend Remove failed: %v", err)
+		}
+		if err := os.Chmod(filepath.Join(testDir, "local"), 0600); err != nil {
+			t.Fatalf("Chmod through the mount: %v", err)
+		}
+		assertStat("local", 1, 0600)
+
+		// Past cacheAttrsTimeSecs but inside the listing's window: still the listed values.
+		time.Sleep(time.Until(listed.Add(2 * time.Second)))
+		assertStat("changed", 1, 0644)
+		assertStat("removed", 1, 0644)
+
+		time.Sleep(time.Until(listed.Add(CacheListingAttrsDuration + CacheAttrsTimeDuration + time.Second)))
+		assertStat("changed", 3, 0600)
+		if _, err := os.Stat(filepath.Join(testDir, "removed")); !os.IsNotExist(err) {
+			t.Fatalf("Stat removed after the window: got %v, want not exist", err)
+		}
+	})
+}
+
 // Testing that FUSE rename invalidates the negative cache for the destination name.
 // Steps:
 // 1. Create srcfile via FUSE

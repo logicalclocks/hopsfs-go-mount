@@ -55,6 +55,78 @@ func TestAttributeCaching(t *testing.T) {
 	assert.Equal(t, dir, dir1)
 }
 
+// Attributes from a listing stay valid for cacheListingAttrsSecs, counted from
+// the end of the listing, for files and directories alike.
+func TestListingAttrsLastListingTTL(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	mockClock := &MockClock{}
+	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
+	hdfsAccessor.EXPECT().TryReserve().Return(true).AnyTimes()
+	fs, _ := NewFileSystem([]HdfsAccessor{hdfsAccessor}, "/", []string{"*"}, false, DelaySyncUntilClose, NewDefaultRetryPolicy(mockClock), mockClock)
+	root, _ := fs.Root()
+	// The accessor stamps every entry with the stat expiry, and this listing takes 10 s.
+	hdfsAccessor.EXPECT().ReadDir("/").DoAndReturn(func(string) ([]Attrs, error) {
+		statExpiry := mockClock.Now().Add(CacheAttrsTimeDuration)
+		mockClock.NotifyTimeElapsed(10 * time.Second)
+		return []Attrs{
+			{Name: "dir1", Mode: os.ModeDir | 0755, Expires: statExpiry},
+			{Name: "file1", Mode: 0644, Size: 1, Expires: statExpiry},
+		}, nil
+	})
+	_, err := root.(*DirINode).ReadDirAll(nil)
+	assert.Nil(t, err)
+	dir, err := root.(*DirINode).Lookup(nil, "dir1")
+	assert.Nil(t, err)
+	file, err := root.(*DirINode).Lookup(nil, "file1")
+	assert.Nil(t, err)
+
+	// Within the window both are served from the listing: the mock fails the test on any Stat.
+	mockClock.NotifyTimeElapsed(CacheListingAttrsDuration - time.Second)
+	var attr fuse.Attr
+	assert.Nil(t, dir.Attr(nil, &attr))
+	assert.Equal(t, os.ModeDir|0755, attr.Mode)
+	assert.Nil(t, file.Attr(nil, &attr))
+	assert.Equal(t, uint64(1), attr.Size)
+
+	hdfsAccessor.EXPECT().Stat("/dir1").Return(Attrs{Name: "dir1", Mode: os.ModeDir | 0700}, nil)
+	hdfsAccessor.EXPECT().Stat("/file1").Return(Attrs{Name: "file1", Mode: 0644, Size: 2}, nil)
+	mockClock.NotifyTimeElapsed(2 * time.Second)
+	assert.Nil(t, dir.Attr(nil, &attr))
+	assert.Equal(t, os.ModeDir|0700, attr.Mode)
+	assert.Nil(t, file.Attr(nil, &attr))
+	assert.Equal(t, uint64(2), attr.Size)
+}
+
+// Attributes a stat brings keep cacheAttrsTimeSecs, also for a node a listing created.
+func TestStatAttrsKeepStatTTL(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	mockClock := &MockClock{}
+	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
+	hdfsAccessor.EXPECT().TryReserve().Return(true).AnyTimes()
+	fs, _ := NewFileSystem([]HdfsAccessor{hdfsAccessor}, "/", []string{"*"}, false, DelaySyncUntilClose, NewDefaultRetryPolicy(mockClock), mockClock)
+	root, _ := fs.Root()
+	hdfsAccessor.EXPECT().ReadDir("/").Return([]Attrs{{Name: "file1", Mode: 0644, Size: 1}}, nil)
+	_, err := root.(*DirINode).ReadDirAll(nil)
+	assert.Nil(t, err)
+	file, err := root.(*DirINode).Lookup(nil, "file1")
+	assert.Nil(t, err)
+
+	mockClock.NotifyTimeElapsed(CacheListingAttrsDuration + time.Second)
+	hdfsAccessor.EXPECT().Stat("/file1").Return(Attrs{Name: "file1", Mode: 0644, Size: 2, Expires: mockClock.Now().Add(CacheAttrsTimeDuration)}, nil)
+	var attr fuse.Attr
+	assert.Nil(t, file.Attr(nil, &attr))
+	assert.Equal(t, uint64(2), attr.Size)
+
+	mockClock.NotifyTimeElapsed(CacheAttrsTimeDuration - time.Second)
+	assert.Nil(t, file.Attr(nil, &attr))
+	assert.Equal(t, uint64(2), attr.Size)
+
+	hdfsAccessor.EXPECT().Stat("/file1").Return(Attrs{Name: "file1", Mode: 0644, Size: 3}, nil)
+	mockClock.NotifyTimeElapsed(2 * time.Second)
+	assert.Nil(t, file.Attr(nil, &attr))
+	assert.Equal(t, uint64(3), attr.Size)
+}
+
 // Testing whether '-allowedPrefixes' path filtering works for ReadDir
 func TestReadDirWithFiltering(t *testing.T) {
 	mockCtrl := gomock.NewController(t)

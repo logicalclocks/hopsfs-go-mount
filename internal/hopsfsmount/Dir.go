@@ -119,6 +119,9 @@ func (dir *DirINode) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 		logger.Warn("Failed to list DFS directory", logger.Fields{Operation: ReadDir, Path: absolutePath, Error: err})
 		return nil, err
 	}
+	// Counted from the end of the listing, so the stats that follow it (ls -l,
+	// du) find every entry's attributes valid however long the listing took.
+	listingExpires := dir.FileSystem.Clock.Now().Add(CacheListingAttrsDuration)
 
 	entries := make([]fuse.Dirent, 0, len(allAttrs))
 	for _, a := range allAttrs {
@@ -129,6 +132,7 @@ func (dir *DirINode) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 				Type:  a.FuseNodeType(),
 			})
 			// Speculatively pre-create a child node with cached attributes.
+			a.Expires = listingExpires
 			dir.addOrUpdateChildInodeAttrs(ReadDir, a.Name, a)
 		}
 	}
