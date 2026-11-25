@@ -95,6 +95,9 @@ func (file *FileINode) Attr(ctx context.Context, a *fuse.Attr) error {
 	if file.FileSystem.Clock.Now().After(file.Attrs.Expires) {
 		attrs, err := refreshChildAttrs(file.Parent, GetattrFile, file.Attrs.Name)
 		if err == nil && attrs.Mode.IsDir() {
+			// The parent's listing may still say file, and would answer the
+			// kernel's retried lookup.
+			file.life.invalidateListing()
 			err = syscall.ESTALE
 		}
 		if err == nil {

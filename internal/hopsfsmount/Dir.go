@@ -59,6 +59,9 @@ func (dir *DirINode) Attr(ctx context.Context, a *fuse.Attr) error {
 	if dir.Parent != nil && dir.FileSystem.Clock.Now().After(dir.Attrs.Expires) {
 		attrs, err := refreshChildAttrs(dir.Parent, GetattrDir, dir.Attrs.Name)
 		if err == nil && !attrs.Mode.IsDir() {
+			// The parent's listing may still say directory, and would answer
+			// the kernel's retried lookup.
+			dir.life.invalidateListing()
 			err = syscall.ESTALE
 		}
 		if err != nil {

@@ -240,18 +240,26 @@ func TestCreateOfANewFileClosesItsWriterWhenTheFinalStatFails(t *testing.T) {
 	hdfsAccessor.EXPECT().TryReserve().Return(true).AnyTimes()
 	fs, _ := NewFileSystem([]HdfsAccessor{hdfsAccessor}, "/", []string{"*"}, false, DelaySyncUntilClose, NewDefaultRetryPolicy(mockClock), mockClock)
 	root, _ := fs.Root()
-	file := root.(*DirINode).cacheChildInode(root.(*DirINode), "unit_test", "newfile", Attrs{Name: "newfile", Mode: os.FileMode(0644)}, false).(*FileINode)
 
 	hdfswriter := NewMockHdfsWriter(mockCtrl)
 	hdfswriter.EXPECT().Close().Return(nil)
 	hdfsAccessor.EXPECT().CreateFileWithGroup("/newfile", gomock.Any(), false, gomock.Any()).Return(hdfswriter, nil)
-	hdfsAccessor.EXPECT().Stat("/newfile").Return(Attrs{}, syscall.EIO)
+	// Create makes its own node, which is in the children map only until the
+	// failure removes it.
+	var file *FileINode
+	hdfsAccessor.EXPECT().Stat("/newfile").DoAndReturn(func(string) (Attrs, error) {
+		file, _ = root.(*DirINode).getChildInode("unit_test", "newfile").(*FileINode)
+		return Attrs{}, syscall.EIO
+	})
 
 	_, _, err := root.(*DirINode).Create(nil, &fuse.CreateRequest{Name: "newfile",
 		Flags: fuse.OpenReadWrite | fuse.OpenCreate, Mode: os.FileMode(0644)}, &fuse.CreateResponse{})
 	assert.Equal(t, syscall.EIO, err)
-	assert.Equal(t, 0, file.countActiveHandles())
-	assert.Nil(t, file.pendingDFSWriter)
+	if assert.NotNil(t, file) {
+		assert.Equal(t, 0, file.countActiveHandles())
+		assert.Nil(t, file.pendingDFSWriter)
+	}
+	assert.Nil(t, root.(*DirINode).getChildInode("unit_test", "newfile"))
 }
 
 // Testing that Mkdir invalidates negative cache

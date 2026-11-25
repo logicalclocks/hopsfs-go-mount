@@ -161,6 +161,59 @@ func TestRetiredDirectoryReleasesItsCaches(t *testing.T) {
 	assert.Equal(t, int64(0), root.FileSystem.negativeEntries.Load())
 }
 
+func TestRetiredDirectoryTakesNoNegativeEntries(t *testing.T) {
+	root, hdfsAccessor, clock := newLifecycleTestRoot(t)
+	hdfsAccessor.EXPECT().Stat("/d").Return(Attrs{Name: "d", Mode: os.ModeDir | 0755, Expires: clock.Now().Add(CacheAttrsTimeDuration)}, nil)
+	node, _ := root.Lookup(nil, "d")
+	dir := node.(*DirINode)
+	dir.RetireLocked()
+
+	// A lookup that was still running when the kernel forgot the directory.
+	hdfsAccessor.EXPECT().Stat("/d/missing").Return(Attrs{}, syscall.ENOENT)
+	_, err := dir.Lookup(nil, "missing")
+
+	assert.Equal(t, syscall.ENOENT, err)
+	assert.Equal(t, int64(0), root.FileSystem.negativeEntries.Load())
+}
+
+func TestInvalidatedEntryKeepsItsSlotAccounted(t *testing.T) {
+	clock := &MockClock{}
+	cache := newListingCache(1 << 20)
+	dir := &baseDirNode{}
+	cache.store(dir, listedFiles(3, clock), clock.Now(), 0)
+	before, _ := cache.usage()
+
+	cache.invalidate(dir, "f00001")
+
+	after, entries := cache.usage()
+	assert.Equal(t, before-int64(len("f00001")), after)
+	assert.Equal(t, int64(2), entries)
+	cache.drop(dir)
+	after, _ = cache.usage()
+	assert.Equal(t, int64(0), after)
+}
+
+func TestEntryThatChangedTypeIsNotServedFromTheListing(t *testing.T) {
+	root, hdfsAccessor, clock := newLifecycleTestRoot(t)
+	hdfsAccessor.EXPECT().Stat("/f00001").Return(fileAttrs("f00001", clock), nil)
+	node, _ := root.Lookup(nil, "f00001")
+	clock.NotifyTimeElapsed(CacheAttrsTimeDuration - time.Second)
+	hdfsAccessor.EXPECT().ReadDir("/").Return(listedFiles(3, clock), nil)
+	root.ReadDirAll(nil)
+
+	// The node's attributes expire first; another client replaced the file
+	// with a directory.
+	clock.NotifyTimeElapsed(2 * time.Second)
+	asDir := Attrs{Name: "f00001", Mode: os.ModeDir | 0755, Expires: clock.Now().Add(CacheAttrsTimeDuration)}
+	hdfsAccessor.EXPECT().Stat("/f00001").Return(asDir, nil).Times(2)
+	var attr fuse.Attr
+	assert.Equal(t, syscall.ESTALE, node.Attr(nil, &attr))
+
+	again, err := root.Lookup(nil, "f00001")
+	assert.Nil(t, err)
+	assert.IsType(t, &DirINode{}, again)
+}
+
 func TestNegativeCacheIsCappedAcrossTheMount(t *testing.T) {
 	root, hdfsAccessor, _ := newLifecycleTestRoot(t)
 	defer func(max int) { NegativeCacheMaxEntries = max }(NegativeCacheMaxEntries)

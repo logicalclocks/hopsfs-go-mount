@@ -127,7 +127,9 @@ func (c *listingCache) invalidate(dir *baseDirNode, name string) {
 	}
 	if a, ok := l.entries[name]; ok {
 		delete(l.entries, name)
-		size := listingEntryBytes(a)
+		// The map keeps the deleted entry's slot until the listing goes, so
+		// only the strings are given back here.
+		size := listingEntryBytes(a) - listingEntryOverhead
 		l.bytes -= size
 		c.bytes -= size
 		c.entries--

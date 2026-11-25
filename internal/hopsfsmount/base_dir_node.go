@@ -21,6 +21,7 @@ type baseDirNode struct {
 	Parent        Pather               // Pointer to the parent directory (allows computing fully-qualified paths on demand)
 	children      map[string]fs.Node   // Cached directory entries
 	negativeCache map[string]time.Time // Caches "not found" results: name -> expiry time
+	released      bool                 // releaseCaches ran: the negative cache takes no more entries
 	listing       *dirListing          // Owned by FileSystem.listings and guarded by its mutex
 	listingGen    uint64               // Counts invalidations of this directory's listing; same guard
 	childrenMutex sync.Mutex           // for concurrent read and updates of children/negativeCache
@@ -194,6 +195,11 @@ func (dir *baseDirNode) addNegativeCacheEntry(name string) {
 	dir.lockChildrenMutex()
 	defer dir.unlockChildrenMutex()
 
+	// A request still running on a retired directory would add an entry that
+	// nothing releases.
+	if dir.released {
+		return
+	}
 	now := dir.FileSystem.Clock.Now()
 	for cached, expiry := range dir.negativeCache {
 		if now.After(expiry) {
@@ -201,15 +207,17 @@ func (dir *baseDirNode) addNegativeCacheEntry(name string) {
 			dir.FileSystem.negativeEntries.Add(-1)
 		}
 	}
-	_, known := dir.negativeCache[name]
-	if !known && dir.FileSystem.negativeEntries.Load() >= int64(NegativeCacheMaxEntries) {
-		return
+	if _, known := dir.negativeCache[name]; !known {
+		// Reserve before inserting: childrenMutex is per directory, so a
+		// separate check and increment would let two directories take the
+		// last slot.
+		if dir.FileSystem.negativeEntries.Add(1) > int64(NegativeCacheMaxEntries) {
+			dir.FileSystem.negativeEntries.Add(-1)
+			return
+		}
 	}
 	if dir.negativeCache == nil {
 		dir.negativeCache = make(map[string]time.Time)
-	}
-	if !known {
-		dir.FileSystem.negativeEntries.Add(1)
 	}
 	dir.negativeCache[name] = now.Add(CacheAttrsTimeDuration)
 }
@@ -234,6 +242,7 @@ func (dir *baseDirNode) releaseCaches() {
 	defer dir.unlockChildrenMutex()
 	dir.FileSystem.negativeEntries.Add(-int64(len(dir.negativeCache)))
 	dir.negativeCache = nil
+	dir.released = true
 }
 
 func (dir *baseDirNode) invalidateListing(name string) {
