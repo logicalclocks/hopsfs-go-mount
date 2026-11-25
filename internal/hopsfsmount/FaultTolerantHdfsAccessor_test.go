@@ -5,11 +5,14 @@ package hopsfsmount
 
 import (
 	"errors"
+	"io"
 	"os"
 	"syscall"
 	"testing"
 	"time"
 
+	"bazil.org/fuse"
+	"github.com/colinmarc/hdfs/v2"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 )
@@ -102,4 +105,78 @@ func atMost2Attempts() *RetryPolicy {
 	rp.MaxAttempts = 2
 	rp.TimeLimit = time.Hour
 	return rp
+}
+
+// connectionLost is the error the accessor returns for a namenode call that
+// failed on its connection: the client's ConnectionError, translated.
+func connectionLost(sent bool) error {
+	return unwrapAndTranslateError(&os.PathError{Op: "stat", Path: "/test", Err: &hdfs.ConnectionError{Method: "getFileInfo", Sent: sent, Err: io.EOF}})
+}
+
+// An idle namenode connection closed by the far side reads end of stream. The
+// client reports it as a ConnectionError, which the mount must retry on a new
+// client and never pass on as a benign end of file (EIO to the user).
+func TestMetadataEOFIsAConnectionFailure(t *testing.T) {
+	for _, sent := range []bool{false, true} {
+		err := connectionLost(sent)
+		assert.False(t, IsSuccessOrNonRetriableError(err), "sent=%v", sent)
+		assert.True(t, needsReconnect(err), "sent=%v", sent)
+		assert.NotEqual(t, io.EOF, err)
+		assert.Equal(t, fuse.EIO, fuse.ToErrno(err))
+	}
+
+	mockCtrl := gomock.NewController(t)
+	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
+	hdfsAccessor.EXPECT().TryReserve().Return(true).AnyTimes()
+	ftHdfsAccessor := NewFaultTolerantHdfsAccessor(hdfsAccessor, atMost2Attempts())
+	hdfsAccessor.EXPECT().Stat("/test/file").Return(Attrs{}, connectionLost(true))
+	hdfsAccessor.EXPECT().Close().Return(nil)
+	hdfsAccessor.EXPECT().Stat("/test/file").Return(Attrs{Name: "file"}, nil)
+	attrs, err := ftHdfsAccessor.Stat("/test/file")
+	assert.Nil(t, err)
+	assert.Equal(t, "file", attrs.Name)
+}
+
+// A change whose request was sent and got no answer may have run, so it is
+// not sent again. The mock refuses a second call.
+func TestChangesAreNotRetriedAfterTheRequestWasSent(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
+	hdfsAccessor.EXPECT().TryReserve().Return(true).AnyTimes()
+	ftHdfsAccessor := NewFaultTolerantHdfsAccessor(hdfsAccessor, atMost2Attempts())
+
+	hdfsAccessor.EXPECT().Mkdir("/d", os.FileMode(0755)).Return(connectionLost(true))
+	assert.Error(t, ftHdfsAccessor.Mkdir("/d", os.FileMode(0755)))
+	hdfsAccessor.EXPECT().Remove("/d").Return(connectionLost(true))
+	assert.Error(t, ftHdfsAccessor.Remove("/d"))
+	hdfsAccessor.EXPECT().Rename("/a", "/b").Return(connectionLost(true))
+	assert.Error(t, ftHdfsAccessor.Rename("/a", "/b"))
+	hdfsAccessor.EXPECT().Rename2("/a", "/b", hdfs.RenameOptions(hdfs.RENAME_OPTION_NONE)).Return(connectionLost(true))
+	assert.Error(t, ftHdfsAccessor.Rename2("/a", "/b", hdfs.RenameOptions(hdfs.RENAME_OPTION_NONE)))
+	hdfsAccessor.EXPECT().CreateFile("/f", os.FileMode(0644), false).Return(nil, connectionLost(true))
+	_, err := ftHdfsAccessor.CreateFile("/f", os.FileMode(0644), false)
+	assert.Error(t, err)
+}
+
+// A change whose request never went out is safe to send on a new client.
+func TestChangesAreRetriedWhenTheRequestWasNotSent(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
+	hdfsAccessor.EXPECT().TryReserve().Return(true).AnyTimes()
+	ftHdfsAccessor := NewFaultTolerantHdfsAccessor(hdfsAccessor, atMost2Attempts())
+
+	gomock.InOrder(
+		hdfsAccessor.EXPECT().Mkdir("/d", os.FileMode(0755)).Return(connectionLost(false)),
+		hdfsAccessor.EXPECT().Close().Return(nil),
+		hdfsAccessor.EXPECT().Mkdir("/d", os.FileMode(0755)).Return(nil),
+	)
+	assert.Nil(t, ftHdfsAccessor.Mkdir("/d", os.FileMode(0755)))
+
+	gomock.InOrder(
+		hdfsAccessor.EXPECT().CreateFile("/f", os.FileMode(0644), false).Return(nil, connectionLost(false)),
+		hdfsAccessor.EXPECT().Close().Return(nil),
+		hdfsAccessor.EXPECT().CreateFile("/f", os.FileMode(0644), false).Return(nil, nil),
+	)
+	_, err := ftHdfsAccessor.CreateFile("/f", os.FileMode(0644), false)
+	assert.Nil(t, err)
 }

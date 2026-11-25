@@ -116,9 +116,9 @@ func (dfs *HdfsAccessorImpl) connectToNameNodeImpl() (*hdfs.Client, error) {
 	// Performing an attempt to connect to the name node
 	// Colinmar's hdfs implementation has supported the multiple name node connection
 	hdfsOptions := hdfs.ClientOptions{
-		Addresses: dfs.NameNodeAddresses,
-		TLS:       dfs.TLSConfig.TLS,
-		User:      hadoopUserName,
+		Addresses:              dfs.NameNodeAddresses,
+		TLS:                    dfs.TLSConfig.TLS,
+		User:                   hadoopUserName,
 		NamenodeDialTimeout:    NameNodeDialTimeout,
 		NamenodeTCPUserTimeout: NameNodeTCPUserTimeout,
 		NamenodeRetryBudget:    clientRetryBudget(NameNodeRetryBudget),
@@ -377,6 +377,14 @@ func unwrapAndTranslateError(err error) error {
 		return err
 	}
 
+	if cf, ok := err.(*connectionFailure); ok {
+		return cf
+	}
+	var ce *hdfs.ConnectionError
+	if errors.As(err, &ce) {
+		return &connectionFailure{sent: ce.Sent, err: err}
+	}
+
 	e := err
 	if pathError, ok := err.(*os.PathError); ok {
 		e = pathError.Err
@@ -411,6 +419,33 @@ func unwrapAndTranslateError(err error) error {
 
 	logger.Warn(fmt.Sprintf("Unrecognized Error: %T %v. Returning: %v ", err, err, syscall.EIO), nil)
 	return syscall.EIO
+}
+
+// connectionFailure is a namenode call that failed on its connection, not with
+// an answer. It is retried on a new client, except a change whose request was
+// sent (maybeRan). FUSE answers it with EIO once the retries are spent.
+type connectionFailure struct {
+	sent bool
+	err  error
+}
+
+func (e *connectionFailure) Error() string     { return e.err.Error() }
+func (e *connectionFailure) Unwrap() error     { return e.err }
+func (e *connectionFailure) Errno() fuse.Errno { return fuse.Errno(syscall.EIO) }
+
+// maybeRan reports a change whose request reached the namenode with no answer
+// back. The namenode may have run it, so it is not sent again: a second create,
+// mkdir, delete or rename would fail on the first one's result.
+func maybeRan(err error) bool {
+	var cf *connectionFailure
+	return errors.As(err, &cf) && cf.sent
+}
+
+// notSent reports a connection failure before the request went out, which any
+// call can repeat.
+func notSent(err error) bool {
+	var cf *connectionFailure
+	return errors.As(err, &cf) && !cf.sent
 }
 
 func isNonRetriableError(err error) bool {

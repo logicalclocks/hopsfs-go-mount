@@ -55,14 +55,29 @@ func (fta *FaultTolerantHdfsAccessor) OpenRead(path string) (ReadSeekCloser, err
 	}
 }
 
-// Opens HDFS file for writing
+// Opens HDFS file for writing. Retried only when the create was not sent: a
+// create that ran and is sent again fails on the file it made.
 func (fta *FaultTolerantHdfsAccessor) CreateFile(path string, mode os.FileMode, overwrite bool) (HdfsWriter, error) {
-	return fta.Impl.CreateFile(path, mode, overwrite)
+	op := fta.RetryPolicy.StartOperation()
+	for {
+		w, err := fta.Impl.CreateFile(path, mode, overwrite)
+		if err == nil || !notSent(err) || !op.ShouldRetry("[%s] CreateFile: %s", path, err) {
+			return w, err
+		}
+		fta.Impl.Close()
+	}
 }
 
-// Opens HDFS file for writing with specific group
+// Opens HDFS file for writing with specific group, retried as CreateFile.
 func (fta *FaultTolerantHdfsAccessor) CreateFileWithGroup(path string, mode os.FileMode, overwrite bool, groupname string) (HdfsWriter, error) {
-	return fta.Impl.CreateFileWithGroup(path, mode, overwrite, groupname)
+	op := fta.RetryPolicy.StartOperation()
+	for {
+		w, err := fta.Impl.CreateFileWithGroup(path, mode, overwrite, groupname)
+		if err == nil || !notSent(err) || !op.ShouldRetry("[%s] CreateFileWithGroup (group=%s): %s", path, groupname, err) {
+			return w, err
+		}
+		fta.Impl.Close()
+	}
 }
 
 // Enumerates HDFS directory
@@ -109,7 +124,7 @@ func (fta *FaultTolerantHdfsAccessor) Mkdir(path string, mode os.FileMode) error
 	op := fta.RetryPolicy.StartOperation()
 	for {
 		err := fta.Impl.Mkdir(path, mode)
-		if IsSuccessOrNonRetriableError(err) || !op.ShouldRetry("[%s] Mkdir %s: %s", path, mode, err) {
+		if IsSuccessOrNonRetriableError(err) || maybeRan(err) || !op.ShouldRetry("[%s] Mkdir %s: %s", path, mode, err) {
 			return err
 		} else if needsReconnect(err) {
 			fta.Impl.Close()
@@ -122,7 +137,7 @@ func (fta *FaultTolerantHdfsAccessor) MkdirWithGroup(path string, mode os.FileMo
 	op := fta.RetryPolicy.StartOperation()
 	for {
 		err := fta.Impl.MkdirWithGroup(path, mode, groupname)
-		if IsSuccessOrNonRetriableError(err) || !op.ShouldRetry("[%s] MkdirWithGroup %s (group=%s): %s", path, mode, groupname, err) {
+		if IsSuccessOrNonRetriableError(err) || maybeRan(err) || !op.ShouldRetry("[%s] MkdirWithGroup %s (group=%s): %s", path, mode, groupname, err) {
 			return err
 		} else if needsReconnect(err) {
 			fta.Impl.Close()
@@ -135,7 +150,7 @@ func (fta *FaultTolerantHdfsAccessor) Remove(path string) error {
 	op := fta.RetryPolicy.StartOperation()
 	for {
 		err := fta.Impl.Remove(path)
-		if IsSuccessOrNonRetriableError(err) || !op.ShouldRetry("[%s] Remove: %s", path, err) {
+		if IsSuccessOrNonRetriableError(err) || maybeRan(err) || !op.ShouldRetry("[%s] Remove: %s", path, err) {
 			return err
 		} else if needsReconnect(err) {
 			fta.Impl.Close()
@@ -148,7 +163,7 @@ func (fta *FaultTolerantHdfsAccessor) Rename(oldPath string, newPath string) err
 	op := fta.RetryPolicy.StartOperation()
 	for {
 		err := fta.Impl.Rename(oldPath, newPath)
-		if IsSuccessOrNonRetriableError(err) || !op.ShouldRetry("[%s] Rename to %s: %s", oldPath, newPath, err) {
+		if IsSuccessOrNonRetriableError(err) || maybeRan(err) || !op.ShouldRetry("[%s] Rename to %s: %s", oldPath, newPath, err) {
 			return err
 		} else if needsReconnect(err) {
 			fta.Impl.Close()
@@ -161,7 +176,7 @@ func (fta *FaultTolerantHdfsAccessor) Rename2(oldPath string, newPath string, op
 	op := fta.RetryPolicy.StartOperation()
 	for {
 		err := fta.Impl.Rename2(oldPath, newPath, options)
-		if IsSuccessOrNonRetriableError(err) || !op.ShouldRetry("[%s] Rename to %s: %s", oldPath, newPath, err) {
+		if IsSuccessOrNonRetriableError(err) || maybeRan(err) || !op.ShouldRetry("[%s] Rename to %s: %s", oldPath, newPath, err) {
 			return err
 		} else if needsReconnect(err) {
 			fta.Impl.Close()
