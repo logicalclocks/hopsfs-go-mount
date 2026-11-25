@@ -17,6 +17,8 @@ Options:
         Comma-separated list of allowed path prefixes on the remote file system, if specified the mount point will expose access to those prefixes only (default "*")
   -cacheAttrsTimeSecs int
         Cache INodes' Attrs. Set to 0 to disable caching INode attrs. (default 5)
+  -cacheListingAttrsSecs int
+        Seconds the attributes from a directory listing stay cached, counted from the end of the listing. Attributes from a stat keep cacheAttrsTimeSecs. The value of cacheAttrsTimeSecs gives the behaviour before this flag; 0 keeps none, so each entry's first stat after a listing goes to the namenode. (default 60)
   -clientCertificate string
         Client certificate location (default "/srv/hops/super_crypto/hdfs/hdfs_certificate_bundle.pem")
   -clientKey string
