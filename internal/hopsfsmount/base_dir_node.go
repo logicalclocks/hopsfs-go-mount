@@ -4,6 +4,8 @@ package hopsfsmount
 
 import (
 	"hash/fnv"
+	"os"
+	"path"
 	"sync"
 	"syscall"
 	"time"
@@ -19,34 +21,100 @@ type baseDirNode struct {
 	Parent        Pather               // Pointer to the parent directory (allows computing fully-qualified paths on demand)
 	children      map[string]fs.Node   // Cached directory entries
 	negativeCache map[string]time.Time // Caches "not found" results: name -> expiry time
+	released      bool                 // releaseCaches ran: the negative cache takes no more entries
+	listing       *dirListing          // Owned by FileSystem.listings and guarded by its mutex
+	listingGen    uint64               // Counts invalidations of this directory's listing; same guard
 	childrenMutex sync.Mutex           // for concurrent read and updates of children/negativeCache
 	dirMutex      sync.Mutex           // One read or write operation on a directory at a time
 }
 
-func newDirINode(fileSystem *FileSystem, parent Pather, attrs Attrs) *DirINode {
-	return &DirINode{
+func newDirINode(fileSystem *FileSystem, parent parentDir, attrs Attrs) *DirINode {
+	dir := &DirINode{
 		baseDirNode: baseDirNode{
 			FileSystem: fileSystem,
-			Parent:     parent,
 			Attrs:      attrs,
 		},
 	}
+	if parent != nil {
+		dir.Parent = parent
+		dir.life.parent = parent
+		dir.life.name = attrs.Name
+	}
+	return dir
 }
 
-func (dir *baseDirNode) getChildInode(operation, name string) fs.Node {
+func newFileINode(fileSystem *FileSystem, parent parentDir, attrs Attrs) *FileINode {
+	file := &FileINode{FileSystem: fileSystem, Parent: parent, Attrs: attrs}
+	file.life.parent = parent
+	file.life.name = attrs.Name
+	return file
+}
+
+// cacheChildInode caches a real child of parent, whose embedded base is dir,
+// under name. An existing node of the right kind keeps its identity and takes
+// the new attrs, unless fresh is set: Create and Mkdir pass fresh so that the
+// node they return is one the kernel cannot have dropped already.
+func (dir *baseDirNode) cacheChildInode(parent parentDir, operation, name string, attrs Attrs, fresh bool) fs.Node {
+	node, created, numChildren := dir.cacheChildInodeLocked(parent, name, attrs, fresh)
+	if created {
+		logger.Debug("Children's List. Cached child ", logger.Fields{Operation: operation, Child: name, NumChildren: numChildren})
+	}
+	return node
+}
+
+func (dir *baseDirNode) cacheChildInodeLocked(parent parentDir, name string, attrs Attrs, fresh bool) (fs.Node, bool, int) {
 	dir.lockChildrenMutex()
 	defer dir.unlockChildrenMutex()
 
 	if dir.children == nil {
 		dir.children = make(map[string]fs.Node)
-		return nil
 	}
 
-	node := dir.children[name]
-	if node != nil {
-		logger.Debug("Children's List. getChildInode ", logger.Fields{Operation: operation, Child: name, NumChildren: len(dir.children)})
+	isDir := (attrs.Mode & os.ModeDir) != 0
+	if !fresh {
+		switch node := dir.children[name].(type) {
+		case *DirINode:
+			if isDir {
+				node.Attrs = attrs
+				return node, false, 0
+			}
+		case *FileINode:
+			if !isDir {
+				node.Attrs = attrs
+				return node, false, 0
+			}
+		}
+	}
+
+	attrs.Name = name
+	var node fs.Node
+	if isDir {
+		node = newDirINode(dir.FileSystem, parent, attrs)
 	} else {
-		logger.Debug("Children's List. getChildInode. Not Found  ", logger.Fields{Operation: operation, Child: name, NumChildren: len(dir.children)})
+		node = newFileINode(dir.FileSystem, parent, attrs)
+	}
+	dir.children[name] = node
+	return node, true, len(dir.children)
+}
+
+// The children-map helpers log after releasing childrenMutex: a node retiring
+// on the FUSE request reader takes that lock, so a slow log sink must not
+// hold it.
+func (dir *baseDirNode) getChildInode(operation, name string) fs.Node {
+	dir.lockChildrenMutex()
+	if dir.children == nil {
+		dir.children = make(map[string]fs.Node)
+		dir.unlockChildrenMutex()
+		return nil
+	}
+	node := dir.children[name]
+	numChildren := len(dir.children)
+	dir.unlockChildrenMutex()
+
+	if node != nil {
+		logger.Debug("Children's List. getChildInode ", logger.Fields{Operation: operation, Child: name, NumChildren: numChildren})
+	} else {
+		logger.Debug("Children's List. getChildInode. Not Found  ", logger.Fields{Operation: operation, Child: name, NumChildren: numChildren})
 	}
 
 	return node
@@ -54,33 +122,52 @@ func (dir *baseDirNode) getChildInode(operation, name string) fs.Node {
 
 func (dir *baseDirNode) removeChildInode(operation, name string) {
 	dir.lockChildrenMutex()
-	defer dir.unlockChildrenMutex()
-
-	if dir.children != nil {
-		delete(dir.children, name)
-		logger.Debug("Children's List. removeChildInode ", logger.Fields{Operation: operation, Child: name, NumChildren: len(dir.children)})
+	if dir.children == nil {
+		dir.unlockChildrenMutex()
+		return
 	}
+	delete(dir.children, name)
+	numChildren := len(dir.children)
+	dir.unlockChildrenMutex()
+
+	logger.Debug("Children's List. removeChildInode ", logger.Fields{Operation: operation, Child: name, NumChildren: numChildren})
 }
 
 // used in rename. when an inode is moved from one dir to another
 func (dir *baseDirNode) adoptChildInode(operation, name string, node fs.Node) {
+	replaced, numChildren := dir.adoptChild(name, node)
+	logAdoptedChild(operation, name, replaced, numChildren)
+}
+
+func (dir *baseDirNode) adoptChild(name string, node fs.Node) (replaced bool, numChildren int) {
 	dir.lockChildrenMutex()
 	defer dir.unlockChildrenMutex()
-
 	if dir.children == nil {
 		dir.children = make(map[string]fs.Node)
 	}
-
-	if _, ok := dir.children[name]; ok {
-		logger.Debug("Children's List. Adopted inode. Replaced existing node ", logger.Fields{Operation: operation, Child: name, NumChildren: len(dir.children)})
-	} else {
-		logger.Debug("Children's List. Adopted inode. Added new node ", logger.Fields{Operation: operation, Child: name, NumChildren: len(dir.children)})
-	}
-
+	_, replaced = dir.children[name]
+	numChildren = len(dir.children)
 	dir.children[name] = node
+	return replaced, numChildren
+}
+
+func logAdoptedChild(operation, name string, replaced bool, numChildren int) {
+	if replaced {
+		logger.Debug("Children's List. Adopted inode. Replaced existing node ", logger.Fields{Operation: operation, Child: name, NumChildren: numChildren})
+	} else {
+		logger.Debug("Children's List. Adopted inode. Added new node ", logger.Fields{Operation: operation, Child: name, NumChildren: numChildren})
+	}
 }
 
 func (dir *baseDirNode) checkNegativeCache(operation, name string) bool {
+	if !dir.negativeCacheHolds(name) {
+		return false
+	}
+	logger.Debug("Negative cache hit", logger.Fields{Operation: operation, Child: name})
+	return true
+}
+
+func (dir *baseDirNode) negativeCacheHolds(name string) bool {
 	dir.lockChildrenMutex()
 	defer dir.unlockChildrenMutex()
 
@@ -95,10 +182,10 @@ func (dir *baseDirNode) checkNegativeCache(operation, name string) bool {
 
 	if dir.FileSystem.Clock.Now().After(expiry) {
 		delete(dir.negativeCache, name)
+		dir.FileSystem.negativeEntries.Add(-1)
 		return false
 	}
 
-	logger.Debug("Negative cache hit", logger.Fields{Operation: operation, Child: name})
 	return true
 }
 
@@ -108,11 +195,31 @@ func (dir *baseDirNode) addNegativeCacheEntry(name string) {
 	dir.lockChildrenMutex()
 	defer dir.unlockChildrenMutex()
 
+	// A request still running on a retired directory would add an entry that
+	// nothing releases.
+	if dir.released {
+		return
+	}
+	now := dir.FileSystem.Clock.Now()
+	for cached, expiry := range dir.negativeCache {
+		if now.After(expiry) {
+			delete(dir.negativeCache, cached)
+			dir.FileSystem.negativeEntries.Add(-1)
+		}
+	}
+	if _, known := dir.negativeCache[name]; !known {
+		// Reserve before inserting: childrenMutex is per directory, so a
+		// separate check and increment would let two directories take the
+		// last slot.
+		if dir.FileSystem.negativeEntries.Add(1) > int64(NegativeCacheMaxEntries) {
+			dir.FileSystem.negativeEntries.Add(-1)
+			return
+		}
+	}
 	if dir.negativeCache == nil {
 		dir.negativeCache = make(map[string]time.Time)
 	}
-
-	dir.negativeCache[name] = dir.FileSystem.Clock.Now().Add(CacheAttrsTimeDuration)
+	dir.negativeCache[name] = now.Add(CacheAttrsTimeDuration)
 }
 
 // removeNegativeCacheEntry removes a name from the negative cache.
@@ -121,9 +228,25 @@ func (dir *baseDirNode) removeNegativeCacheEntry(name string) {
 	dir.lockChildrenMutex()
 	defer dir.unlockChildrenMutex()
 
-	if dir.negativeCache != nil {
+	if _, ok := dir.negativeCache[name]; ok {
 		delete(dir.negativeCache, name)
+		dir.FileSystem.negativeEntries.Add(-1)
 	}
+}
+
+// releaseCaches frees what a directory that is leaving the namespace holds
+// in the mount-wide caches.
+func (dir *baseDirNode) releaseCaches() {
+	dir.FileSystem.listings.drop(dir)
+	dir.lockChildrenMutex()
+	defer dir.unlockChildrenMutex()
+	dir.FileSystem.negativeEntries.Add(-int64(len(dir.negativeCache)))
+	dir.negativeCache = nil
+	dir.released = true
+}
+
+func (dir *baseDirNode) invalidateListing(name string) {
+	dir.FileSystem.listings.invalidate(dir, name)
 }
 
 func (dir *baseDirNode) lockMutex() {
@@ -142,39 +265,38 @@ func (dir *baseDirNode) unlockChildrenMutex() {
 	dir.childrenMutex.Unlock()
 }
 
-func (dir *baseDirNode) Forget() {
-	dir.lockMutex()
-	defer dir.unlockMutex()
-	// inodes are removed on delete and rename operations.
-	// this forget call is redundant and it causes problems.
-	// In the mount point we identify inodes by names.
-	// For example, we remove a file /some/dir/file. Before
-	// the forget call is processed if the user recreates the
-	// file /some/dir/file then processing forget request
-	// would lead to deleting a correct inode
-	// to fix this issue we have to use inode IDs
-}
-
 // inodeStatter is the interface satisfied by directory nodes that can stat their
-// children against the backend. Used by parentStatInodeInHopsFS to dispatch a stat
-// through a parent of unknown concrete type.
+// children against the backend, whatever its concrete type.
 type inodeStatter interface {
 	Pather
-	statInodeInHopsFS(operation, name string, attrs *Attrs) (fs.Node, error)
+	addNegativeCacheEntry(name string)
+	invalidateListing(name string)
+	fileSystem() *FileSystem
 }
 
-// parentStatInodeInHopsFS stats name as a child of parent (real or synthetic), dispatching
-// through the concrete type's statInodeInHopsFS so AbsolutePath resolves correctly.
-// Returns ENOENT if parent is nil or does not implement inodeStatter.
-func parentStatInodeInHopsFS(parent Pather, operation, name string, attrs *Attrs) (fs.Node, error) {
-	if parent == nil {
-		return nil, syscall.ENOENT
+// refreshChildAttrs stats name under parent for a node that already exists
+// and returns the new attributes. Unlike statInodeInHopsFS it touches no
+// children map: a node that has left its parent's map must stay out of it.
+func refreshChildAttrs(parent Pather, operation, name string) (Attrs, error) {
+	statter, ok := parent.(inodeStatter)
+	if !ok {
+		return Attrs{}, syscall.ENOENT
 	}
-	if statter, ok := parent.(inodeStatter); ok {
-		return statter.statInodeInHopsFS(operation, name, attrs)
+	childPath := path.Join(statter.AbsolutePath(), name)
+	statCalls.Add(1)
+	attrs, err := statter.fileSystem().getDFSConnector().Stat(childPath)
+	if err != nil {
+		logger.Info("Stat failed on backend", logger.Fields{Operation: operation, Path: childPath, Error: err})
+		if err == syscall.ENOENT {
+			statter.addNegativeCacheEntry(name)
+			statter.invalidateListing(name)
+		}
+		return Attrs{}, err
 	}
-	return nil, syscall.ENOENT
+	return attrs, nil
 }
+
+func (dir *baseDirNode) fileSystem() *FileSystem { return dir.FileSystem }
 
 // syntheticInodeBase places all synthetic inode numbers in [2^62, 2^63), well above
 // any plausible HopsFS backend inode (which grow monotonically from a small base)

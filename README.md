@@ -71,6 +71,14 @@ Options:
         stage directory for writing files (default "/tmp")
   -stagingCacheDiskCheckInterval duration
         Interval for checking disk usage for cache eviction (default 1s)
+  -listingCacheMB int
+        Memory for attributes of listed directory entries, which save a namenode call for each lookup that follows a listing. 0 disables (default 64)
+  -negativeCacheMaxEntries int
+        Max names remembered as absent across the mount. 0 disables (default 4096)
+  -maxCachedFiles int
+        Files the kernel may keep cached, each of which the mount holds in memory. Above this the mount asks the kernel to drop the oldest unopened ones. 0 disables (default 200000)
+  -statsReportingInterval duration
+        Interval for logging node and cache counters at warn level (0 to disable, e.g., 1m for every minute)
   -stagingCacheMaxDiskUsage float
         Max disk usage ratio for caching staging files (0.0-0.8, default: 0.60)
   -stagingCacheMaxDownloadSize int
@@ -117,6 +125,41 @@ An added connection stays open until the mount exits. The namenode closes
 idle connections only once it holds `ipc.client.idlethreshold` (4000) of
 them, so size the limit with the number of mounts in mind.
 `-numExtraConnections 0` turns adding connections off.
+
+Memory
+------
+
+The mount holds one node in memory for each file or directory the kernel
+references, and frees it when the kernel sends FORGET. Three settings bound
+the rest:
+
+- `-maxCachedFiles` (default 200000). The kernel keeps the entry of every file
+  it has looked up, and so a reference to its node, until the container that
+  did the lookups runs short of memory. Above this many referenced files the
+  mount asks the kernel to drop the entries of the oldest ones that are not
+  open. The next access to such a file costs one lookup. The limit is a
+  target: the kernel decides when it lets go, and a file it still uses (open,
+  memory mapped, executing) stays. Directories are never dropped this way, so
+  a tree holds one node for each directory the kernel remembers. A regular
+  file that is itself a bind mount target, such as a Kubernetes `subPath`
+  file mount, loses that mount if its entry is dropped while no process has
+  it open; set the limit to 0 on a mount used that way.
+- `-listingCacheMB` (default 64). A directory listing keeps the attributes of
+  its entries for `-cacheAttrsTimeSecs`, so the lookups that follow need no
+  namenode call. Whole listings are evicted oldest first when the budget is
+  full, and a listing larger than the budget is not kept.
+- `-negativeCacheMaxEntries` (default 4096). Names found absent.
+
+One directory is still listed in a single call, so its whole listing is in
+memory while it is read.
+
+At startup the mount sets the Go runtime's soft memory limit to 85% of the
+container's memory limit (`/sys/fs/cgroup/memory.max`, or the cgroup v1
+file). `GOMEMLIMIT` in the environment takes precedence, and outside a
+container with a limit nothing is set.
+
+`-statsReportingInterval 1m` logs registered nodes, cache sizes, namenode
+listing and stat calls, heap in use and goroutines.
 
 Virtual Directories
 -------------------

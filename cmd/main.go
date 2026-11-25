@@ -21,6 +21,7 @@ import (
 func main() {
 	retryPolicy := hopsfsmount.NewDefaultRetryPolicy(hopsfsmount.WallClock{})
 	hopsfsmount.ParseArgsAndInitLogger(retryPolicy)
+	hopsfsmount.SetMemoryLimitFromCgroup()
 
 	// Initialize connection username once at startup
 	if err := hopsfsmount.InitConnectionUser(); err != nil {
@@ -103,6 +104,9 @@ func main() {
 		logger.Error(fmt.Sprintf("Failed to increase file descriptor limit: %v", err), logger.Fields{})
 	}
 	hopsfsmount.InitStagingFileCache()
+	stopBackground := make(chan struct{})
+	defer close(stopBackground)
+	fileSystem.StartStatsReporter(hopsfsmount.StatsReportingInterval, stopBackground)
 
 	defer func() {
 		if hopsfsmount.StagingCache != nil {
@@ -128,7 +132,11 @@ func main() {
 			retryPolicy.MaxDelay = 0
 		}
 	}()
-	err = fs.Serve(c, fileSystem)
+	// Safe inline: retirement never blocks (node_lifecycle.go) and the only
+	// kernel notification the mount sends is InvalidateEntry (fs.Config).
+	server := fs.New(c, &fs.Config{InlineForget: true})
+	fileSystem.StartNodeEvictor(server, stopBackground)
+	err = server.Serve(fileSystem)
 	if err != nil {
 		logger.Fatal(fmt.Sprintf("Failed to serve FS. Error: %v", err), nil)
 	}

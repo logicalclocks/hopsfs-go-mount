@@ -50,6 +50,19 @@ func (attrs *Attrs) ConvertAttrToFuse(a *fuse.Attr) error {
 	return nil
 }
 
+// validFor is how long the kernel may cache these attributes: what is left
+// of their own lifetime, so serving them from a cache never extends it.
+func (attrs *Attrs) validFor(now time.Time) time.Duration {
+	left := attrs.Expires.Sub(now)
+	if left < 0 {
+		return 0
+	}
+	if left > CacheAttrsTimeDuration {
+		return CacheAttrsTimeDuration
+	}
+	return left
+}
+
 // returns fuse.DirentType for this attributes (DT_Dir or DT_File)
 func (attrs *Attrs) FuseNodeType() fuse.DirentType {
 	if (attrs.Mode & os.ModeDir) == os.ModeDir {

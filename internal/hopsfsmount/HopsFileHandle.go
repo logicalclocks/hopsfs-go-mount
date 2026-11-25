@@ -176,11 +176,13 @@ func (fh *FileHandle) Release(_ context.Context, _ *fuse.ReleaseRequest) error {
 	return nil
 }
 
-// abandon closes a handle the kernel never received, after a failed CREATE,
+var _ fs.HandleAbandoner = (*FileHandle)(nil)
+
+// Abandon closes a handle the kernel never received, after a failed CREATE,
 // for which neither FLUSH nor RELEASE will come. A new file's DFS writer is
 // closed here too, since only Flush closes it otherwise and it holds the
 // file's lease.
-func (fh *FileHandle) abandon(ctx context.Context) {
+func (fh *FileHandle) Abandon(ctx context.Context) {
 	fh.File.lockData()
 	if w := fh.File.pendingDFSWriter; w != nil {
 		fh.File.pendingDFSWriter = nil
