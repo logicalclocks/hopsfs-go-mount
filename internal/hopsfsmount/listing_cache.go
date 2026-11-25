@@ -71,7 +71,8 @@ func (c *listingCache) store(dir *baseDirNode, all []Attrs, now time.Time, gen u
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.removeLocked(dir)
-	if bytes > c.maxBytes || dir.listingGen != gen {
+	// An empty listing answers no lookup and would be held at no charge.
+	if len(all) == 0 || bytes > c.maxBytes || dir.listingGen != gen {
 		return
 	}
 	entries := make(map[string]Attrs, len(all))

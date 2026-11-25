@@ -411,7 +411,9 @@ func (file *FileINode) Setattr(ctx context.Context, req *fuse.SetattrRequest, re
 	defer file.unlockFile()
 
 	path := file.AbsolutePath()
-	file.life.invalidateListing()
+	// On the way out, a failure after a partial change included: a listing of
+	// the parent read before the change is then never kept.
+	defer file.life.invalidateListing()
 
 	if req.Valid.Mode() {
 		if err := ChmodOp(&file.Attrs, file.FileSystem, path, req, resp); err != nil {

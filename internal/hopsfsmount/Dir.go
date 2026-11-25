@@ -361,6 +361,10 @@ func (dir *DirINode) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp
 		return syscall.ENOTSUP
 	}
 
+	// On the way out, a failure after a partial change included: a listing of
+	// the parent read before the change is then never kept.
+	defer dir.life.invalidateListing()
+
 	if req.Valid.Mode() {
 		if err := ChmodOp(&dir.Attrs, dir.FileSystem, path, req, resp); err != nil {
 			logger.Warn("Setattr (chmod) failed. ", logger.Fields{Operation: Chmod, Path: path, Mode: req.Mode})
@@ -375,7 +379,6 @@ func (dir *DirINode) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp
 		}
 	}
 
-	dir.life.invalidateListing()
 	if err := UpdateTS(&dir.Attrs, dir.FileSystem, path, req, resp); err != nil {
 		return err
 	}

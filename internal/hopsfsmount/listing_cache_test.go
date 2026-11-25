@@ -214,6 +214,45 @@ func TestEntryThatChangedTypeIsNotServedFromTheListing(t *testing.T) {
 	assert.IsType(t, &DirINode{}, again)
 }
 
+func TestEmptyListingIsNotStored(t *testing.T) {
+	clock := &MockClock{}
+	cache := newListingCache(1 << 20)
+	dir := &baseDirNode{}
+	cache.store(dir, listedFiles(3, clock), clock.Now(), 0)
+
+	cache.store(dir, nil, clock.Now(), 0)
+
+	assert.Nil(t, dir.listing)
+	assert.Equal(t, 0, cache.order.Len())
+	bytes, entries := cache.usage()
+	assert.Equal(t, int64(0), bytes)
+	assert.Equal(t, int64(0), entries)
+}
+
+func TestListingReadWhileSetattrIsPendingIsNotKept(t *testing.T) {
+	root, hdfsAccessor, clock := newLifecycleTestRoot(t)
+	hdfsAccessor.EXPECT().Stat("/f00001").Return(fileAttrs("f00001", clock), nil)
+	node, _ := root.Lookup(nil, "f00001")
+	file := node.(*FileINode)
+
+	// The parent is listed after Setattr started and before the backend
+	// applied the change, so the listing carries the old mode.
+	hdfsAccessor.EXPECT().ReadDir("/").Return(listedFiles(3, clock), nil)
+	hdfsAccessor.EXPECT().Chmod("/f00001", os.FileMode(0600)).DoAndReturn(func(string, os.FileMode) error {
+		_, err := root.ReadDirAll(nil)
+		return err
+	})
+	assert.Nil(t, file.Setattr(nil, &fuse.SetattrRequest{Valid: fuse.SetattrMode, Mode: 0600}, &fuse.SetattrResponse{}))
+
+	file.RetireLocked()
+	changed := fileAttrs("f00001", clock)
+	changed.Mode = 0600
+	hdfsAccessor.EXPECT().Stat("/f00001").Return(changed, nil)
+	again, err := root.Lookup(nil, "f00001")
+	assert.Nil(t, err)
+	assert.Equal(t, os.FileMode(0600), again.(*FileINode).Attrs.Mode)
+}
+
 func TestNegativeCacheIsCappedAcrossTheMount(t *testing.T) {
 	root, hdfsAccessor, _ := newLifecycleTestRoot(t)
 	defer func(max int) { NegativeCacheMaxEntries = max }(NegativeCacheMaxEntries)
