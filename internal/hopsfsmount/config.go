@@ -55,7 +55,7 @@ var StagingCacheDiskUsageCheckInterval time.Duration = 1 * time.Second
 var StagingCacheStatsReportingInterval time.Duration = 0
 var NameNodeDialTimeout time.Duration = 30 * time.Second
 var NameNodeTCPUserTimeout time.Duration = 30 * time.Second
-var ListingCacheMB int = 64
+var ListingCacheMB int = 128
 var NegativeCacheMaxEntries int = 4096
 var MaxCachedFiles int = 200000
 var StatsReportingInterval time.Duration = 0
@@ -98,7 +98,7 @@ func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	flag.Float64Var(&StagingCacheMaxDiskUsage, "stagingCacheMaxDiskUsage", 0.60, "Max disk usage ratio for caching staging files (0.0-0.8, default: 0.60)")
 	flag.IntVar(&StagingCacheMaxEntries, "stagingCacheMaxEntries", 10240, "Max staging files to cache locally (0 to disable)")
 	flag.DurationVar(&StagingCacheDiskUsageCheckInterval, "stagingCacheDiskCheckInterval", 1*time.Second, "Interval for checking disk usage for cache eviction (default: 1s)")
-	flag.IntVar(&ListingCacheMB, "listingCacheMB", 64, "Memory for attributes of listed directory entries, which save a namenode call for each lookup that follows a listing. 0 disables")
+	flag.IntVar(&ListingCacheMB, "listingCacheMB", 128, "Memory for attributes of listed directory entries, which save a namenode call for each lookup that follows a listing. 0 disables")
 	flag.IntVar(&NegativeCacheMaxEntries, "negativeCacheMaxEntries", 4096, "Max names remembered as absent across the mount. 0 disables")
 	flag.IntVar(&MaxCachedFiles, "maxCachedFiles", 200000, "Files the kernel may keep cached, each of which the mount holds in memory. Above this the mount asks the kernel to drop the oldest unopened ones. 0 disables")
 	flag.DurationVar(&StatsReportingInterval, "statsReportingInterval", 0, "Interval for logging node and cache counters at warn level (0 to disable, e.g., 1m for every minute)")

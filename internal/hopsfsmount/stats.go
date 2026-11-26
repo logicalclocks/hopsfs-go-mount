@@ -55,9 +55,15 @@ var cgroupMemoryLimitFiles = []string{
 	"/sys/fs/cgroup/memory/memory.limit_in_bytes",
 }
 
-// SetMemoryLimitFromCgroup gives the Go runtime a soft memory limit of 85% of
-// the container's memory limit, so the garbage collector works harder as the
-// mount nears the point where the kernel would kill it. A GOMEMLIMIT in the
+// memoryLimitPercent is the share of the container's memory limit given to the
+// Go heap. The collector lets garbage fill whatever it is given, and the kernel
+// charges the container for more than the heap, so at 85% a 1 GiB sidecar
+// peaked at 1016 MB with under 500 MB live, and at 650 MiB it peaked at 682 MB.
+const memoryLimitPercent = 65
+
+// SetMemoryLimitFromCgroup gives the Go runtime a soft memory limit of
+// memoryLimitPercent of the container's memory limit, so the garbage collector
+// works harder as the mount nears the point where the kernel would kill it. A GOMEMLIMIT in the
 // environment wins, and with no readable finite limit nothing is set.
 func SetMemoryLimitFromCgroup() {
 	if os.Getenv("GOMEMLIMIT") != "" {
@@ -69,9 +75,9 @@ func SetMemoryLimitFromCgroup() {
 		if !ok {
 			continue
 		}
-		soft := limit / 100 * 85
+		soft := limit / 100 * memoryLimitPercent
 		debug.SetMemoryLimit(soft)
-		logger.Info(fmt.Sprintf("Go memory limit set to %d bytes, 85%% of the %d in %s", soft, limit, file), nil)
+		logger.Info(fmt.Sprintf("Go memory limit set to %d bytes, %d%% of the %d in %s", soft, memoryLimitPercent, limit, file), nil)
 		return
 	}
 	logger.Info("No container memory limit found, Go memory limit not set", nil)

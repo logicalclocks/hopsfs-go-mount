@@ -72,7 +72,7 @@ Options:
   -stagingCacheDiskCheckInterval duration
         Interval for checking disk usage for cache eviction (default 1s)
   -listingCacheMB int
-        Memory for attributes of listed directory entries, which save a namenode call for each lookup that follows a listing. 0 disables (default 64)
+        Memory for attributes of listed directory entries, which save a namenode call for each lookup that follows a listing. 0 disables (default 128)
   -negativeCacheMaxEntries int
         Max names remembered as absent across the mount. 0 disables (default 4096)
   -maxCachedFiles int
@@ -145,7 +145,7 @@ the rest:
   file that is itself a bind mount target, such as a Kubernetes `subPath`
   file mount, loses that mount if its entry is dropped while no process has
   it open; set the limit to 0 on a mount used that way.
-- `-listingCacheMB` (default 64). A directory listing keeps the attributes of
+- `-listingCacheMB` (default 128). A directory listing keeps the attributes of
   its entries for `-cacheAttrsTimeSecs`, so the lookups that follow need no
   namenode call. Whole listings are evicted oldest first when the budget is
   full, and a listing larger than the budget is not kept.
@@ -155,7 +155,7 @@ the rest:
 One directory is still listed in a single call, so its whole listing is in
 memory while it is read.
 
-At startup the mount sets the Go runtime's soft memory limit to 85% of the
+At startup the mount sets the Go runtime's soft memory limit to 65% of the
 container's memory limit (`/sys/fs/cgroup/memory.max`, or the cgroup v1
 file). `GOMEMLIMIT` in the environment takes precedence, and outside a
 container with a limit nothing is set.
