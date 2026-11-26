@@ -23,7 +23,8 @@ type entryInvalidator interface {
 }
 
 // registeredFiles holds a mount's kernel-referenced file nodes, oldest
-// registration first. mu is a leaf lock, taken under nodeLife.mu.
+// registration first. mu is a leaf lock: RegisterLocked and RetireLocked take
+// it under the FUSE server's metadata mutex.
 type registeredFiles struct {
 	mu    sync.Mutex
 	files list.List // of *FileINode
@@ -139,6 +140,12 @@ func (r *registeredFiles) oldestAbove(limit int) []*FileINode {
 	return victims
 }
 
+func (r *registeredFiles) len() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.files.Len()
+}
+
 // entry returns the directory and name a live node is cached under.
 func (life *nodeLife) entry() (parent parentDir, name string, ok bool) {
 	life.mu.Lock()
@@ -148,12 +155,14 @@ func (life *nodeLife) entry() (parent parentDir, name string, ok bool) {
 
 // evictFileNodes asks the kernel to drop the entries of the oldest files above
 // limit. A dropped entry comes back as a FORGET, which retires the node. Open
-// files are skipped: the kernel would keep them anyway. Directories are never
+// files are skipped: the kernel would keep them anyway. So is a file whose
+// handle mutex is taken, which an open holds for as long as a download.
+// Directories are never
 // offered, because dropping a directory's entry detaches whatever is mounted
 // below it and breaks the working directory of processes inside it.
 func (filesystem *FileSystem) evictFileNodes(server entryInvalidator, limit int) {
 	for _, file := range filesystem.fileNodes.oldestAbove(limit) {
-		if file.countActiveHandles() > 0 {
+		if !file.closedAndIdle() {
 			continue
 		}
 		parent, name, ok := file.life.entry()

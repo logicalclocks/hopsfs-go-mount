@@ -178,3 +178,16 @@ func TestEvictorLeavesANameADirectoryOperationHasClaimed(t *testing.T) {
 	assert.Equal(t, []string{"f0"}, server.names())
 	assert.Empty(t, root.FileSystem.evicting.binding)
 }
+
+func TestEvictorDoesNotWaitForAFileBeingOpened(t *testing.T) {
+	root, hdfsAccessor, clock := newLifecycleTestRoot(t)
+	files := registerFiles(t, root, hdfsAccessor, clock, 2)
+	// An open holds this for as long as its download takes.
+	files[0].lockFileHandles()
+	defer files[0].unlockFileHandles()
+	server := &recordingInvalidator{}
+
+	root.FileSystem.evictFileNodes(server, 0)
+
+	assert.Equal(t, []string{"f1"}, server.names())
+}

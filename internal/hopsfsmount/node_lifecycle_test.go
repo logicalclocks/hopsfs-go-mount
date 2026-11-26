@@ -172,3 +172,22 @@ func TestChildRetiresAfterItsParent(t *testing.T) {
 	assert.Equal(t, 0, childCount(dir))
 	assert.Equal(t, "/d/f", node.(*FileINode).AbsolutePath())
 }
+
+func TestAttrRefreshThatRacesARenameKeepsTheMovedNode(t *testing.T) {
+	root, hdfsAccessor, clock := newLifecycleTestRoot(t)
+	hdfsAccessor.EXPECT().Stat("/f").Return(fileAttrs("f", clock), nil)
+	node, _ := root.Lookup(nil, "f")
+	clock.NotifyTimeElapsed(CacheAttrsTimeDuration + time.Second)
+
+	// The refresh read the old path, and the rename completes before the
+	// backend answers it.
+	hdfsAccessor.EXPECT().Rename2("/f", "/g", gomock.Any()).Return(nil)
+	hdfsAccessor.EXPECT().Stat("/f").DoAndReturn(func(string) (Attrs, error) {
+		assert.Nil(t, root.Rename(nil, &fuse.RenameRequest{OldName: "f", NewName: "g"}, root))
+		return Attrs{}, syscall.ENOENT
+	})
+	var attr fuse.Attr
+	assert.Equal(t, syscall.ENOENT, node.Attr(nil, &attr))
+
+	assert.Same(t, node, root.getChildInode("unit_test", "g"))
+}

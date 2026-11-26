@@ -169,7 +169,8 @@ func (fh *FileHandle) Release(_ context.Context, _ *fuse.ReleaseRequest) error {
 	defer fh.File.unlockData()
 
 	//close the file handle if it is the last handle
-	fh.File.InvalidateMetadataCache()
+	// A write was flushed, and the parent's listing invalidated, before this.
+	fh.File.expireAttrs()
 	fh.File.RemoveHandle(fh)
 
 	logger.Info("Closed file handle ", fh.logInfo(logger.Fields{Operation: Close, Flags: fh.fileFlags, TotalBytesRead: fh.tatalBytesRead, TotalBytesWritten: fh.totalBytesWritten}))

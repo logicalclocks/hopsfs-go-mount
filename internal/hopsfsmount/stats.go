@@ -43,8 +43,8 @@ func (filesystem *FileSystem) statsLine() string {
 	var mem runtime.MemStats
 	runtime.ReadMemStats(&mem)
 	listingBytes, listingEntries := filesystem.listings.usage()
-	return fmt.Sprintf("Mount stats: registeredNodes=%d refusedRegistrations=%d invalidatedEntries=%d listingBytes=%d listingEntries=%d negativeEntries=%d readDirCalls=%d statCalls=%d heapInuse=%d goroutines=%d",
-		registeredNodes.Load(), refusedRegistrations.Load(), invalidatedEntries.Load(), listingBytes, listingEntries, filesystem.negativeEntries.Load(),
+	return fmt.Sprintf("Mount stats: registeredFiles=%d registeredDirs=%d refusedRegistrations=%d invalidatedEntries=%d listingBytes=%d listingEntries=%d negativeEntries=%d readDirCalls=%d statCalls=%d heapInuse=%d goroutines=%d",
+		filesystem.fileNodes.len(), registeredDirs.Load(), refusedRegistrations.Load(), invalidatedEntries.Load(), listingBytes, listingEntries, filesystem.negatives.len(),
 		readDirCalls.Load(), statCalls.Load(), mem.HeapInuse, runtime.NumGoroutine())
 }
 

@@ -152,13 +152,13 @@ func TestRetiredDirectoryReleasesItsCaches(t *testing.T) {
 	dir.ReadDirAll(nil)
 	hdfsAccessor.EXPECT().Stat("/d/missing").Return(Attrs{}, syscall.ENOENT)
 	dir.Lookup(nil, "missing")
-	assert.Equal(t, int64(1), root.FileSystem.negativeEntries.Load())
+	assert.Equal(t, int64(1), root.FileSystem.negatives.len())
 
 	dir.RetireLocked()
 
 	_, entries := root.FileSystem.listings.usage()
 	assert.Equal(t, int64(0), entries)
-	assert.Equal(t, int64(0), root.FileSystem.negativeEntries.Load())
+	assert.Equal(t, int64(0), root.FileSystem.negatives.len())
 }
 
 func TestRetiredDirectoryTakesNoNegativeEntries(t *testing.T) {
@@ -173,7 +173,7 @@ func TestRetiredDirectoryTakesNoNegativeEntries(t *testing.T) {
 	_, err := dir.Lookup(nil, "missing")
 
 	assert.Equal(t, syscall.ENOENT, err)
-	assert.Equal(t, int64(0), root.FileSystem.negativeEntries.Load())
+	assert.Equal(t, int64(0), root.FileSystem.negatives.len())
 }
 
 func TestInvalidatedEntryKeepsItsSlotAccounted(t *testing.T) {
@@ -263,7 +263,7 @@ func TestNegativeCacheIsCappedAcrossTheMount(t *testing.T) {
 		root.Lookup(nil, name)
 	}
 
-	assert.Equal(t, int64(2), root.FileSystem.negativeEntries.Load())
+	assert.Equal(t, int64(2), root.FileSystem.negatives.len())
 	// "c" did not fit, so it is asked for again; "a" is answered from the cache.
 	hdfsAccessor.EXPECT().Stat("/c").Return(Attrs{}, syscall.ENOENT)
 	root.Lookup(nil, "c")
@@ -334,4 +334,54 @@ func TestEntryFoundAbsentIsNotServedFromTheListing(t *testing.T) {
 
 	_, err := root.Lookup(nil, "f00001")
 	assert.Equal(t, syscall.ENOENT, err)
+}
+
+func TestExpiredNegativeEntriesOfIdleDirectoriesGiveTheirSlotsBack(t *testing.T) {
+	root, hdfsAccessor, clock := newLifecycleTestRoot(t)
+	defer func(max int) { NegativeCacheMaxEntries = max }(NegativeCacheMaxEntries)
+	NegativeCacheMaxEntries = 4
+
+	var dirs []*DirINode
+	for _, name := range []string{"d0", "d1"} {
+		hdfsAccessor.EXPECT().Stat("/"+name).Return(Attrs{Name: name, Mode: os.ModeDir | 0755, Expires: clock.Now().Add(CacheAttrsTimeDuration)}, nil)
+		node, _ := root.Lookup(nil, name)
+		dir := node.(*DirINode)
+		for _, missing := range []string{"a", "b"} {
+			hdfsAccessor.EXPECT().Stat("/"+name+"/"+missing).Return(Attrs{}, syscall.ENOENT)
+			dir.Lookup(nil, missing)
+		}
+		dirs = append(dirs, dir)
+	}
+	assert.Equal(t, int64(4), root.FileSystem.negatives.len())
+
+	// Nobody visits d0 or d1 again.
+	clock.NotifyTimeElapsed(CacheAttrsTimeDuration + time.Second)
+	hdfsAccessor.EXPECT().Stat("/missing").Return(Attrs{}, syscall.ENOENT)
+	root.Lookup(nil, "missing")
+
+	assert.Equal(t, int64(1), root.FileSystem.negatives.len())
+	for _, dir := range dirs {
+		assert.Empty(t, dir.negativeCache)
+	}
+	// No Stat is expected: the new miss found a free slot.
+	_, err := root.Lookup(nil, "missing")
+	assert.Equal(t, syscall.ENOENT, err)
+}
+
+func TestClosingAFileKeepsItsParentsListing(t *testing.T) {
+	root, hdfsAccessor, clock := newLifecycleTestRoot(t)
+	hdfsAccessor.EXPECT().ReadDir("/").Return(listedFiles(3, clock), nil)
+	root.ReadDirAll(nil)
+	node, _ := root.Lookup(nil, "f00001")
+	file := node.(*FileINode)
+	handle := &FileHandle{File: file}
+	file.activeHandles = []*FileHandle{handle}
+	gen := root.FileSystem.listings.generation(&root.baseDirNode)
+
+	assert.Nil(t, handle.Release(nil, nil))
+
+	assert.Equal(t, gen, root.FileSystem.listings.generation(&root.baseDirNode), "a listing being read must survive the close of a file nobody wrote")
+	_, entries := root.FileSystem.listings.usage()
+	assert.Equal(t, int64(3), entries)
+	assert.True(t, clock.Now().After(file.Attrs.Expires))
 }

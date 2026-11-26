@@ -30,8 +30,9 @@ type nodeLife struct {
 	retired bool
 }
 
-// Kernel-referenced nodes, for the mount's statistics.
-var registeredNodes atomic.Int64
+// Kernel-referenced directories, for the mount's statistics. They are never
+// evicted, so this is the part of the node count that only the kernel lowers.
+var registeredDirs atomic.Int64
 
 // Registrations refused because the node had retired between an entry reply
 // selecting it and the server registering it.
@@ -45,7 +46,6 @@ func (life *nodeLife) register() bool {
 		refusedRegistrations.Add(1)
 		return false
 	}
-	registeredNodes.Add(1)
 	return true
 }
 
@@ -55,18 +55,19 @@ func (life *nodeLife) retire(self fs.Node) {
 	life.mu.Lock()
 	defer life.mu.Unlock()
 	life.retired = true
-	registeredNodes.Add(-1)
 	if life.parent != nil {
 		life.parent.forgetChild(life.name, self)
 	}
 }
 
 // detach removes self from its parent's map without retiring it: the entry
-// is gone from the backend while the kernel may still hold the node.
-func (life *nodeLife) detach(self fs.Node) {
+// parent/name, where the caller looked for self, is gone from the backend
+// while the kernel may still hold the node. A node that a rename moved since
+// stays in the map it moved to.
+func (life *nodeLife) detach(self fs.Node, parent Pather, name string) {
 	life.mu.Lock()
 	defer life.mu.Unlock()
-	if life.parent != nil {
+	if life.parent != nil && life.parent == parent && life.name == name {
 		life.parent.forgetChild(life.name, self)
 	}
 }
@@ -128,7 +129,13 @@ func (dir *baseDirNode) hasChild(name string, node fs.Node) bool {
 var _ fs.NodeRetirer = (*DirINode)(nil)
 var _ fs.NodeRetirer = (*FileINode)(nil)
 
-func (dir *DirINode) RegisterLocked() bool { return dir.life.register() }
+func (dir *DirINode) RegisterLocked() bool {
+	if !dir.life.register() {
+		return false
+	}
+	registeredDirs.Add(1)
+	return true
+}
 
 func (file *FileINode) RegisterLocked() bool {
 	if !file.life.register() {
@@ -144,6 +151,7 @@ func (file *FileINode) RetireLocked() {
 }
 
 func (dir *DirINode) RetireLocked() {
+	registeredDirs.Add(-1)
 	dir.life.retire(dir)
 	dir.releaseCaches()
 }

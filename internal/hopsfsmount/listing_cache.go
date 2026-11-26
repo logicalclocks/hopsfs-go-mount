@@ -67,17 +67,22 @@ func (c *listingCache) store(dir *baseDirNode, all []Attrs, now time.Time, gen u
 	for _, a := range all {
 		bytes += listingEntryBytes(a)
 	}
+	// Built before mu is taken: every lookup, and a directory retiring on the
+	// FUSE request reader, waits on mu.
+	var entries map[string]Attrs
+	if bytes <= c.maxBytes {
+		entries = make(map[string]Attrs, len(all))
+		for _, a := range all {
+			entries[a.Name] = a
+		}
+	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.removeLocked(dir)
 	// An empty listing answers no lookup and would be held at no charge.
-	if len(all) == 0 || bytes > c.maxBytes || dir.listingGen != gen {
+	if len(entries) == 0 || dir.listingGen != gen {
 		return
-	}
-	entries := make(map[string]Attrs, len(all))
-	for _, a := range all {
-		entries[a.Name] = a
 	}
 	for front := c.order.Front(); front != nil; front = c.order.Front() {
 		oldest := front.Value.(*dirListing)

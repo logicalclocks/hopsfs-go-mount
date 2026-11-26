@@ -57,7 +57,8 @@ func (dir *DirINode) Attr(ctx context.Context, a *fuse.Attr) error {
 	defer dir.unlockMutex()
 
 	if dir.Parent != nil && dir.FileSystem.Clock.Now().After(dir.Attrs.Expires) {
-		attrs, err := refreshChildAttrs(dir.Parent, GetattrDir, dir.Attrs.Name)
+		parent, name := dir.Parent, dir.Attrs.Name
+		attrs, err := refreshChildAttrs(parent, GetattrDir, name)
 		if err == nil && !attrs.Mode.IsDir() {
 			// The parent's listing may still say directory, and would answer
 			// the kernel's retried lookup.
@@ -66,7 +67,7 @@ func (dir *DirINode) Attr(ctx context.Context, a *fuse.Attr) error {
 		}
 		if err != nil {
 			if err == syscall.ENOENT || err == syscall.ESTALE {
-				dir.life.detach(dir)
+				dir.life.detach(dir, parent, name)
 			}
 			return err
 		}

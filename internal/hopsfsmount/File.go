@@ -93,7 +93,8 @@ func (file *FileINode) Attr(ctx context.Context, a *fuse.Attr) error {
 
 	// No local proxy - use cache or fetch from backend
 	if file.FileSystem.Clock.Now().After(file.Attrs.Expires) {
-		attrs, err := refreshChildAttrs(file.Parent, GetattrFile, file.Attrs.Name)
+		parent, name := file.Parent, file.Attrs.Name
+		attrs, err := refreshChildAttrs(parent, GetattrFile, name)
 		if err == nil && attrs.Mode.IsDir() {
 			// The parent's listing may still say file, and would answer the
 			// kernel's retried lookup.
@@ -105,7 +106,7 @@ func (file *FileINode) Attr(ctx context.Context, a *fuse.Attr) error {
 		}
 		if err != nil {
 			if err == syscall.ENOENT || err == syscall.ESTALE {
-				file.life.detach(file)
+				file.life.detach(file, parent, name)
 			}
 			if err == syscall.ENOENT {
 				// A file this mount knew has gone from the backend: the one
@@ -373,11 +374,18 @@ func (file *FileINode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error 
 	return file.flushToDFS(Fsync)
 }
 
-// Invalidates metadata cache, so next ls or stat gives up-to-date file attributes
+// Invalidates metadata cache after the file changed, so next ls or stat gives
+// up-to-date file attributes
 func (file *FileINode) InvalidateMetadataCache() {
+	file.expireAttrs()
+	file.life.invalidateListing()
+}
+
+// expireAttrs makes the next stat of the file ask the backend. The parent's
+// listing stays: it is still right about a file that did not change.
+func (file *FileINode) expireAttrs() {
 	logger.Debug("InvalidateMetadataCache ", file.logInfo(logger.Fields{}))
 	file.Attrs.Expires = file.FileSystem.Clock.Now().Add(-1 * time.Second)
-	file.life.invalidateListing()
 }
 
 // Responds on FUSE Chmod request
@@ -439,6 +447,16 @@ func (file *FileINode) countActiveHandles() int {
 	file.lockFileHandles()
 	defer file.unlockFileHandles()
 	return len(file.activeHandles)
+}
+
+// closedAndIdle reports whether the file has no open handle, without
+// waiting: false also when fileHandleMutex is taken.
+func (file *FileINode) closedAndIdle() bool {
+	if !file.fileHandleMutex.TryLock() {
+		return false
+	}
+	defer file.fileHandleMutex.Unlock()
+	return len(file.activeHandles) == 0
 }
 
 func (file *FileINode) createStagingFile(operation string, existsInDFS bool) (*os.File, error) {

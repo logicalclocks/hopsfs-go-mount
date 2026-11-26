@@ -3,6 +3,7 @@
 package hopsfsmount
 
 import (
+	"container/list"
 	"hash/fnv"
 	"os"
 	"path"
@@ -16,16 +17,16 @@ import (
 
 // baseDirNode encapsulates the common cached directory state shared by real and virtual directories.
 type baseDirNode struct {
-	FileSystem    *FileSystem          // Pointer to the owning filesystem
-	Attrs         Attrs                // Cached attributes of the directory, TODO: add TTL
-	Parent        Pather               // Pointer to the parent directory (allows computing fully-qualified paths on demand)
-	children      map[string]fs.Node   // Cached directory entries
-	negativeCache map[string]time.Time // Caches "not found" results: name -> expiry time
-	released      bool                 // releaseCaches ran: the negative cache takes no more entries
-	listing       *dirListing          // Owned by FileSystem.listings and guarded by its mutex
-	listingGen    uint64               // Counts invalidations of this directory's listing; same guard
-	childrenMutex sync.Mutex           // for concurrent read and updates of children/negativeCache
-	dirMutex      sync.Mutex           // One read or write operation on a directory at a time
+	FileSystem    *FileSystem              // Pointer to the owning filesystem
+	Attrs         Attrs                    // Cached attributes of the directory, TODO: add TTL
+	Parent        Pather                   // Pointer to the parent directory (allows computing fully-qualified paths on demand)
+	children      map[string]fs.Node       // Cached directory entries
+	negativeCache map[string]*list.Element // Caches "not found" results: name -> its negativeEntry in FileSystem.negatives
+	released      bool                     // releaseCaches ran: the negative cache takes no more entries
+	listing       *dirListing              // Owned by FileSystem.listings and guarded by its mutex
+	listingGen    uint64                   // Counts invalidations of this directory's listing; same guard
+	childrenMutex sync.Mutex               // for concurrent read and updates of children/negativeCache
+	dirMutex      sync.Mutex               // One read or write operation on a directory at a time
 }
 
 func newDirINode(fileSystem *FileSystem, parent parentDir, attrs Attrs) *DirINode {
@@ -175,14 +176,14 @@ func (dir *baseDirNode) negativeCacheHolds(name string) bool {
 		return false
 	}
 
-	expiry, ok := dir.negativeCache[name]
+	handle, ok := dir.negativeCache[name]
 	if !ok {
 		return false
 	}
 
-	if dir.FileSystem.Clock.Now().After(expiry) {
+	if dir.FileSystem.Clock.Now().After(handle.Value.(negativeEntry).expiry) {
 		delete(dir.negativeCache, name)
-		dir.FileSystem.negativeEntries.Add(-1)
+		dir.FileSystem.negatives.release(handle)
 		return false
 	}
 
@@ -192,34 +193,31 @@ func (dir *baseDirNode) negativeCacheHolds(name string) bool {
 // addNegativeCacheEntry adds a name to the negative cache with TTL = CacheAttrsTimeDuration.
 // Must NOT hold childrenMutex when calling this.
 func (dir *baseDirNode) addNegativeCacheEntry(name string) {
+	now := dir.FileSystem.Clock.Now()
+	// Expired names of directories nobody visits again would otherwise keep
+	// their slots for the life of the mount.
+	dir.FileSystem.expireNegativeEntries(now)
+
 	dir.lockChildrenMutex()
 	defer dir.unlockChildrenMutex()
 
-	// A request still running on a retired directory would add an entry that
-	// nothing releases.
+	// A request still running on a retired directory would pin it until the
+	// entry expires.
 	if dir.released {
 		return
 	}
-	now := dir.FileSystem.Clock.Now()
-	for cached, expiry := range dir.negativeCache {
-		if now.After(expiry) {
-			delete(dir.negativeCache, cached)
-			dir.FileSystem.negativeEntries.Add(-1)
-		}
+	if known, ok := dir.negativeCache[name]; ok {
+		delete(dir.negativeCache, name)
+		dir.FileSystem.negatives.release(known)
 	}
-	if _, known := dir.negativeCache[name]; !known {
-		// Reserve before inserting: childrenMutex is per directory, so a
-		// separate check and increment would let two directories take the
-		// last slot.
-		if dir.FileSystem.negativeEntries.Add(1) > int64(NegativeCacheMaxEntries) {
-			dir.FileSystem.negativeEntries.Add(-1)
-			return
-		}
+	handle := dir.FileSystem.negatives.reserve(negativeEntry{dir: dir, name: name, expiry: now.Add(CacheAttrsTimeDuration)})
+	if handle == nil {
+		return
 	}
 	if dir.negativeCache == nil {
-		dir.negativeCache = make(map[string]time.Time)
+		dir.negativeCache = make(map[string]*list.Element)
 	}
-	dir.negativeCache[name] = now.Add(CacheAttrsTimeDuration)
+	dir.negativeCache[name] = handle
 }
 
 // removeNegativeCacheEntry removes a name from the negative cache.
@@ -228,9 +226,9 @@ func (dir *baseDirNode) removeNegativeCacheEntry(name string) {
 	dir.lockChildrenMutex()
 	defer dir.unlockChildrenMutex()
 
-	if _, ok := dir.negativeCache[name]; ok {
+	if handle, ok := dir.negativeCache[name]; ok {
 		delete(dir.negativeCache, name)
-		dir.FileSystem.negativeEntries.Add(-1)
+		dir.FileSystem.negatives.release(handle)
 	}
 }
 
@@ -240,7 +238,9 @@ func (dir *baseDirNode) releaseCaches() {
 	dir.FileSystem.listings.drop(dir)
 	dir.lockChildrenMutex()
 	defer dir.unlockChildrenMutex()
-	dir.FileSystem.negativeEntries.Add(-int64(len(dir.negativeCache)))
+	for _, handle := range dir.negativeCache {
+		dir.FileSystem.negatives.release(handle)
+	}
 	dir.negativeCache = nil
 	dir.released = true
 }

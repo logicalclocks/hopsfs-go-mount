@@ -140,7 +140,8 @@ the rest:
   open. The next access to such a file costs one lookup. The limit is a
   target: the kernel decides when it lets go, and a file it still uses (open,
   memory mapped, executing) stays. Directories are never dropped this way, so
-  a tree holds one node for each directory the kernel remembers. A regular
+  a tree holds one node for each directory the kernel remembers, until the
+  kernel lets go of it by itself. A regular
   file that is itself a bind mount target, such as a Kubernetes `subPath`
   file mount, loses that mount if its entry is dropped while no process has
   it open; set the limit to 0 on a mount used that way.
@@ -148,7 +149,8 @@ the rest:
   its entries for `-cacheAttrsTimeSecs`, so the lookups that follow need no
   namenode call. Whole listings are evicted oldest first when the budget is
   full, and a listing larger than the budget is not kept.
-- `-negativeCacheMaxEntries` (default 4096). Names found absent.
+- `-negativeCacheMaxEntries` (default 4096). Names found absent, across all
+  directories, each for `-cacheAttrsTimeSecs`.
 
 One directory is still listed in a single call, so its whole listing is in
 memory while it is read.
@@ -158,8 +160,10 @@ container's memory limit (`/sys/fs/cgroup/memory.max`, or the cgroup v1
 file). `GOMEMLIMIT` in the environment takes precedence, and outside a
 container with a limit nothing is set.
 
-`-statsReportingInterval 1m` logs registered nodes, cache sizes, namenode
-listing and stat calls, heap in use and goroutines.
+`-statsReportingInterval 1m` logs the files and the directories the kernel
+references (`registeredFiles`, `registeredDirs`), cache sizes, namenode
+listing and stat calls, heap in use and goroutines. `registeredDirs` is the
+count no setting bounds.
 
 Virtual Directories
 -------------------

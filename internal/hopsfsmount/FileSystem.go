@@ -20,7 +20,6 @@ import (
 	"os/exec"
 	"os/user"
 	"sync"
-	"sync/atomic"
 )
 
 type FileSystem struct {
@@ -39,10 +38,10 @@ type FileSystem struct {
 	Clock               Clock                    // interface to get wall clock time
 	FsInfo              FsInfo                   // Usage of HDFS, including capacity, remaining, used sizes.
 
-	listings        *listingCache // attributes of listed entries, shared by all directories
-	negativeEntries atomic.Int64  // names in the negative caches of all directories
-	fileNodes       registeredFiles
-	evicting        evictionInFlight
+	listings  *listingCache // attributes of listed entries, shared by all directories
+	negatives negativeQuota // names in the negative caches of all directories
+	fileNodes registeredFiles
+	evicting  evictionInFlight
 
 	closeOnUnmount            []io.Closer     // list of opened files (zip archives) to be closed on unmount
 	closeOnUnmountLock        sync.Mutex      // mutex to protect closeOnUnmount
