@@ -145,22 +145,26 @@ func main() {
 	}
 }
 
-// exitOnSignal ends the process once running write operations have returned,
-// or after ExitTimeout. Unmount alone does not end Serve where another process
-// owns the kernel mount: Serve stays in ReadRequest until the connection ends.
+// exitOnSignal ends the process once no write handler runs and every file's
+// data is in HopsFS, or after ExitTimeout. Unmount alone does not end Serve
+// where another process owns the kernel mount: Serve stays in ReadRequest
+// until the connection ends. The outcome is logged before the unmount, which
+// can be slow or end the process itself.
 func exitOnSignal(fileSystem *hopsfsmount.FileSystem, mountPoint string, sig os.Signal) {
 	pending := fileSystem.WaitForWrites(hopsfsmount.ExitTimeout)
+	code := 0
+	if len(pending) > 0 {
+		code = 1
+		logger.Error(fmt.Sprintf("Exiting on %s with %d writes not in HopsFS after %s: %s",
+			sig, len(pending), hopsfsmount.ExitTimeout, strings.Join(pending, ", ")), nil)
+	} else {
+		logger.Warn(fmt.Sprintf("Exiting on %s with every write in HopsFS", sig), nil)
+	}
 	if hopsfsmount.StagingCache != nil {
 		hopsfsmount.StagingCache.Shutdown()
 	}
 	fileSystem.Unmount(mountPoint)
-	if len(pending) > 0 {
-		logger.Error(fmt.Sprintf("Exiting on %s with %d write operations still running after %s: %s",
-			sig, len(pending), hopsfsmount.ExitTimeout, strings.Join(pending, ", ")), nil)
-		os.Exit(1)
-	}
-	logger.Warn(fmt.Sprintf("Exiting on %s with no write operation running", sig), nil)
-	os.Exit(0)
+	os.Exit(code)
 }
 
 func createStagingDir() {

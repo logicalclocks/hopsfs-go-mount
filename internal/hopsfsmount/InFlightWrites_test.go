@@ -53,3 +53,29 @@ func TestWaitForWritesTimesOutWithThePending(t *testing.T) {
 		t.Fatalf("returned after %s, want the 200 ms bound", elapsed)
 	}
 }
+
+// A dirty file with no handler running keeps the wait open until its flush
+// clears it, and a timeout names it.
+func TestWaitForWritesWaitsForAnUnflushedFile(t *testing.T) {
+	filesystem := &FileSystem{SrcDir: "/base"}
+	root := newDirINode(filesystem, nil, Attrs{Name: ""})
+	file := &FileINode{FileSystem: filesystem, Parent: root, Attrs: Attrs{Name: "f"}}
+	file.markDirty()
+
+	if pending := filesystem.WaitForWrites(100 * time.Millisecond); !reflect.DeepEqual(pending, []string{"unflushed /base/f"}) {
+		t.Fatalf("pending %v, want [unflushed /base/f]", pending)
+	}
+
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		file.isDirty = false
+		filesystem.setOwed(file, false)
+	}()
+	start := time.Now()
+	if pending := filesystem.WaitForWrites(5 * time.Second); pending != nil {
+		t.Fatalf("pending %v, want none", pending)
+	}
+	if elapsed := time.Since(start); elapsed < 100*time.Millisecond || elapsed > 2*time.Second {
+		t.Fatalf("returned after %s, want right after the flush at 100 ms", elapsed)
+	}
+}
