@@ -145,7 +145,11 @@ func (dir *DirINode) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 
 // Responds on FUSE Mkdir request.
 func (dir *DirINode) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error) {
-	defer dir.FileSystem.trackWrite(Mkdir, dir.AbsolutePathForChild(req.Name))()
+	done, refused := dir.FileSystem.trackWrite(Mkdir, dir.AbsolutePathForChild(req.Name))
+	if refused != nil {
+		return nil, refused
+	}
+	defer done()
 	dir.lockMutex()
 	defer dir.unlockMutex()
 
@@ -189,7 +193,11 @@ func (dir *DirINode) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node
 
 // Responds on FUSE Create request.
 func (dir *DirINode) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.CreateResponse) (fs.Node, fs.Handle, error) {
-	defer dir.FileSystem.trackWrite(Create, dir.AbsolutePathForChild(req.Name))()
+	done, refused := dir.FileSystem.trackWrite(Create, dir.AbsolutePathForChild(req.Name))
+	if refused != nil {
+		return nil, nil, refused
+	}
+	defer done()
 	dir.lockMutex()
 	defer dir.unlockMutex()
 
@@ -227,6 +235,7 @@ func (dir *DirINode) Create(ctx context.Context, req *fuse.CreateRequest, resp *
 	handle, err := file.NewFileHandle(false, req.Flags)
 	if err != nil {
 		logger.Error("File creation failed", logger.Fields{Operation: Create, Path: targetPath, Mode: req.Mode, Flags: req.Flags, Error: err})
+		dir.FileSystem.setOwed(file, false)
 		dir.removeChildInode(Create, req.Name)
 		return nil, nil, err
 	}
@@ -242,6 +251,7 @@ func (dir *DirINode) Create(ctx context.Context, req *fuse.CreateRequest, resp *
 	// update the attributes of the file now.
 	_, err = dir.statInodeInHopsFS(Create, file.Attrs.Name, &file.Attrs)
 	if err != nil {
+		dir.FileSystem.setOwed(file, false)
 		dir.removeChildInode(Create, req.Name)
 		return nil, nil, err
 	}
@@ -251,7 +261,11 @@ func (dir *DirINode) Create(ctx context.Context, req *fuse.CreateRequest, resp *
 
 // Responds on FUSE Remove request.
 func (dir *DirINode) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
-	defer dir.FileSystem.trackWrite(Remove, dir.AbsolutePathForChild(req.Name))()
+	done, refused := dir.FileSystem.trackWrite(Remove, dir.AbsolutePathForChild(req.Name))
+	if refused != nil {
+		return refused
+	}
+	defer done()
 	dir.lockMutex()
 	defer dir.unlockMutex()
 
@@ -274,7 +288,11 @@ func (dir *DirINode) Remove(ctx context.Context, req *fuse.RemoveRequest) error 
 
 // Responds on FUSE Rename request.
 func (srcParent *DirINode) Rename(ctx context.Context, req *fuse.RenameRequest, dstParentDir fs.Node) error {
-	defer srcParent.FileSystem.trackWrite(Rename, srcParent.AbsolutePathForChild(req.OldName))()
+	done, refused := srcParent.FileSystem.trackWrite(Rename, srcParent.AbsolutePathForChild(req.OldName))
+	if refused != nil {
+		return refused
+	}
+	defer done()
 	srcParent.lockMutex()
 	defer srcParent.unlockMutex()
 
@@ -283,7 +301,11 @@ func (srcParent *DirINode) Rename(ctx context.Context, req *fuse.RenameRequest, 
 
 // Responds on FUSE Rename request.
 func (srcParent *DirINode) Rename2(ctx context.Context, req *fuse.Rename2Request, dstParentDir fs.Node) error {
-	defer srcParent.FileSystem.trackWrite(Rename2, srcParent.AbsolutePathForChild(req.OldName))()
+	done, refused := srcParent.FileSystem.trackWrite(Rename2, srcParent.AbsolutePathForChild(req.OldName))
+	if refused != nil {
+		return refused
+	}
+	defer done()
 	srcParent.lockMutex()
 	defer srcParent.unlockMutex()
 
@@ -303,7 +325,11 @@ func (srcParent *DirINode) Rename2(ctx context.Context, req *fuse.Rename2Request
 
 // Responds on FUSE Chmod request.
 func (dir *DirINode) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
-	defer dir.FileSystem.trackWrite(Setattr, dir.AbsolutePath())()
+	done, refused := dir.FileSystem.trackWrite(Setattr, dir.AbsolutePath())
+	if refused != nil {
+		return refused
+	}
+	defer done()
 	dir.lockMutex()
 	defer dir.unlockMutex()
 

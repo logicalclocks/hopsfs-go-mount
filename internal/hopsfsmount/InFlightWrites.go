@@ -5,6 +5,7 @@ package hopsfsmount
 import (
 	"sort"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -15,11 +16,12 @@ import (
 // it, while no handler runs, e.g. while the kernel flushes the fds of a
 // killed process one after another.
 type inFlightWrites struct {
-	lock  sync.Mutex
-	next  uint64
-	ops   map[uint64]string
-	owed  map[*FileINode]struct{}
-	ended chan struct{} // one buffered slot, signalled when an operation ends or a file stops being owed
+	lock   sync.Mutex
+	next   uint64
+	ops    map[uint64]string
+	owed   map[*FileINode]struct{}
+	ended  chan struct{} // one buffered slot, signalled when an operation ends or a file stops being owed
+	closed bool          // set when WaitForWrites returns: no handler may start after that
 }
 
 func (w *inFlightWrites) initLocked() {
@@ -38,11 +40,17 @@ func (w *inFlightWrites) signal() {
 }
 
 // trackWrite records one handler as running until the returned func is called.
+// Once WaitForWrites has returned it refuses with EROFS, so a write cannot be
+// acknowledged into a staging file the exiting process never uploads.
 // The path is computed by the caller before it takes any lock, so a later
 // report never needs a node lock.
-func (filesystem *FileSystem) trackWrite(operation string, path string) func() {
+func (filesystem *FileSystem) trackWrite(operation string, path string) (func(), error) {
 	w := &filesystem.writes
 	w.lock.Lock()
+	if w.closed {
+		w.lock.Unlock()
+		return nil, syscall.EROFS
+	}
 	w.initLocked()
 	w.next++
 	id := w.next
@@ -54,7 +62,7 @@ func (filesystem *FileSystem) trackWrite(operation string, path string) func() {
 		delete(w.ops, id)
 		w.signal()
 		w.lock.Unlock()
-	}
+	}, nil
 }
 
 // setOwed records whether file has data that is not in HopsFS yet.
@@ -92,6 +100,7 @@ func (filesystem *FileSystem) PendingWrites() []string {
 
 // WaitForWrites waits up to timeout until no tracked handler runs and every
 // file's data is in HopsFS. It returns what is still pending when it gives up, or nil.
+// Either way no tracked handler starts after it returns.
 func (filesystem *FileSystem) WaitForWrites(timeout time.Duration) []string {
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
@@ -99,6 +108,7 @@ func (filesystem *FileSystem) WaitForWrites(timeout time.Duration) []string {
 		w := &filesystem.writes
 		w.lock.Lock()
 		if len(w.ops) == 0 && len(w.owed) == 0 {
+			w.closed = true
 			w.lock.Unlock()
 			return nil
 		}
@@ -108,6 +118,9 @@ func (filesystem *FileSystem) WaitForWrites(timeout time.Duration) []string {
 		select {
 		case <-ended:
 		case <-deadline.C:
+			w.lock.Lock()
+			w.closed = true
+			w.lock.Unlock()
 			return filesystem.PendingWrites()
 		}
 	}

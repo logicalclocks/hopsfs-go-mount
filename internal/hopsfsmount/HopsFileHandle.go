@@ -103,7 +103,11 @@ func (fh *FileHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fus
 // Responds to FUSE Write request
 // Lock order: dataMutex (3) → fileHandleMutex (1) via upgradeHandleForWriting
 func (fh *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.WriteResponse) error {
-	defer fh.File.FileSystem.trackWrite(Write, fh.File.AbsolutePath())()
+	done, refused := fh.File.FileSystem.trackWrite(Write, fh.File.AbsolutePath())
+	if refused != nil {
+		return refused
+	}
+	defer done()
 	fh.File.lockData()
 	defer fh.File.unlockData()
 
@@ -134,7 +138,11 @@ func (fh *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *f
 // may start before the previous file's upload is complete.
 // Lock order: dataMutex (3) → fileHandleMutex (1) via flushToDFS
 func (fh *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
-	defer fh.File.FileSystem.trackWrite(Flush, fh.File.AbsolutePath())()
+	done, refused := fh.File.FileSystem.trackWrite(Flush, fh.File.AbsolutePath())
+	if refused != nil {
+		return refused
+	}
+	defer done()
 	fh.File.lockData()
 	defer fh.File.unlockData()
 	return fh.File.flushToDFS(Flush)
@@ -143,7 +151,11 @@ func (fh *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 // Responds to the FUSE Fsync request
 // Lock order: dataMutex (3) → fileHandleMutex (1) via flushToDFS
 func (fh *FileHandle) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
-	defer fh.File.FileSystem.trackWrite(Fsync, fh.File.AbsolutePath())()
+	done, refused := fh.File.FileSystem.trackWrite(Fsync, fh.File.AbsolutePath())
+	if refused != nil {
+		return refused
+	}
+	defer done()
 	// If delaySyncUntilClose is enabled, skip fsync until file close
 	if fh.File.FileSystem.DelaySyncUntilClose {
 		logger.Debug("Fsync deferred until close", fh.logInfo(logger.Fields{Operation: Fsync}))
@@ -163,7 +175,11 @@ func (fh *FileHandle) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
 // happen after close() returns, breaking application expectations.
 // Lock order: dataMutex (3) → fileHandleMutex (1) via RemoveHandle
 func (fh *FileHandle) Release(_ context.Context, _ *fuse.ReleaseRequest) error {
-	defer fh.File.FileSystem.trackWrite(Close, fh.File.AbsolutePath())()
+	done, refused := fh.File.FileSystem.trackWrite(Close, fh.File.AbsolutePath())
+	if refused != nil {
+		return refused
+	}
+	defer done()
 	fh.File.lockData()
 	defer fh.File.unlockData()
 
