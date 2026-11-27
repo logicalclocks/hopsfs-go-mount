@@ -145,6 +145,7 @@ func (dir *DirINode) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 
 // Responds on FUSE Mkdir request.
 func (dir *DirINode) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error) {
+	defer dir.FileSystem.trackWrite(Mkdir, dir.AbsolutePathForChild(req.Name))()
 	dir.lockMutex()
 	defer dir.unlockMutex()
 
@@ -188,6 +189,7 @@ func (dir *DirINode) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node
 
 // Responds on FUSE Create request.
 func (dir *DirINode) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.CreateResponse) (fs.Node, fs.Handle, error) {
+	defer dir.FileSystem.trackWrite(Create, dir.AbsolutePathForChild(req.Name))()
 	dir.lockMutex()
 	defer dir.unlockMutex()
 
@@ -262,6 +264,7 @@ func (dir *DirINode) Create(ctx context.Context, req *fuse.CreateRequest, resp *
 
 // Responds on FUSE Remove request.
 func (dir *DirINode) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
+	defer dir.FileSystem.trackWrite(Remove, dir.AbsolutePathForChild(req.Name))()
 	dir.lockMutex()
 	defer dir.unlockMutex()
 
@@ -284,6 +287,7 @@ func (dir *DirINode) Remove(ctx context.Context, req *fuse.RemoveRequest) error 
 
 // Responds on FUSE Rename request.
 func (srcParent *DirINode) Rename(ctx context.Context, req *fuse.RenameRequest, dstParentDir fs.Node) error {
+	defer srcParent.FileSystem.trackWrite(Rename, srcParent.AbsolutePathForChild(req.OldName))()
 	srcParent.lockMutex()
 	defer srcParent.unlockMutex()
 
@@ -292,6 +296,7 @@ func (srcParent *DirINode) Rename(ctx context.Context, req *fuse.RenameRequest, 
 
 // Responds on FUSE Rename request.
 func (srcParent *DirINode) Rename2(ctx context.Context, req *fuse.Rename2Request, dstParentDir fs.Node) error {
+	defer srcParent.FileSystem.trackWrite(Rename2, srcParent.AbsolutePathForChild(req.OldName))()
 	srcParent.lockMutex()
 	defer srcParent.unlockMutex()
 
@@ -311,6 +316,7 @@ func (srcParent *DirINode) Rename2(ctx context.Context, req *fuse.Rename2Request
 
 // Responds on FUSE Chmod request.
 func (dir *DirINode) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
+	defer dir.FileSystem.trackWrite(Setattr, dir.AbsolutePath())()
 	dir.lockMutex()
 	defer dir.unlockMutex()
 

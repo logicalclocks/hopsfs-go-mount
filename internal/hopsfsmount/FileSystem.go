@@ -42,6 +42,7 @@ type FileSystem struct {
 	closeOnUnmountLock        sync.Mutex      // mutex to protect closeOnUnmount
 	virtualRootCollisions     map[string]bool // Configured virtual root names that collide with a real backend entry at the mount root
 	virtualRootCollisionsLock sync.RWMutex    // guards virtualRootCollisions
+	writes                    inFlightWrites  // handlers that change a staged file or HopsFS, for the exit on a signal
 }
 
 // Verify that *FileSystem implements necesary FUSE interfaces

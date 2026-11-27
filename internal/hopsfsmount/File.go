@@ -345,6 +345,7 @@ func (file *FileINode) flushAttempt(operation string) error {
 // Responds to the FUSE Fsync request
 // Lock order: dataMutex (3) → fileHandleMutex (1) via flushToDFS
 func (file *FileINode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
+	defer file.FileSystem.trackWrite(Fsync, file.AbsolutePath())()
 	// If delaySyncUntilClose is enabled, skip fsync until file close
 	if file.FileSystem.DelaySyncUntilClose {
 		logger.Debug("Fsync deferred until close", file.logInfo(logger.Fields{Operation: Fsync}))
@@ -366,6 +367,7 @@ func (file *FileINode) InvalidateMetadataCache() {
 // Responds on FUSE Chmod request
 // Lock order: fileHandleMutex (1) alone for size change, fileMutex (2) alone for other attrs
 func (file *FileINode) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
+	defer file.FileSystem.trackWrite(Setattr, file.AbsolutePath())()
 	logger.Debug("Setattr request received: ", logger.Fields{Operation: Setattr})
 
 	if req.Valid.Size() {
