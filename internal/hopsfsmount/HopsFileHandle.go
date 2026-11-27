@@ -188,6 +188,7 @@ func (fh *FileHandle) abandon(ctx context.Context) {
 	fh.File.lockData()
 	if w := fh.File.pendingDFSWriter; w != nil {
 		fh.File.pendingDFSWriter = nil
+		fh.File.FileSystem.setOwed(fh.File, fh.File.isDirty)
 		if err := w.Close(); err != nil {
 			logger.Error("Failed to close the DFS writer of a failed create", fh.logInfo(logger.Fields{Operation: Create, Error: err}))
 		}
