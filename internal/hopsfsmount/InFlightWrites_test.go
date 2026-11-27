@@ -3,7 +3,9 @@
 package hopsfsmount
 
 import (
+	"errors"
 	"reflect"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -21,8 +23,8 @@ func TestWaitForWritesNoneRunning(t *testing.T) {
 
 func TestWaitForWritesReturnsWhenTheLastEnds(t *testing.T) {
 	filesystem := &FileSystem{}
-	endFlush := filesystem.trackWrite(Flush, "/a")
-	endRelease := filesystem.trackWrite(Close, "/b")
+	endFlush, _ := filesystem.trackWrite(Flush, "/a")
+	endRelease, _ := filesystem.trackWrite(Close, "/b")
 	go func() {
 		time.Sleep(100 * time.Millisecond)
 		endFlush()
@@ -41,9 +43,10 @@ func TestWaitForWritesReturnsWhenTheLastEnds(t *testing.T) {
 
 func TestWaitForWritesTimesOutWithThePending(t *testing.T) {
 	filesystem := &FileSystem{}
-	endFlush := filesystem.trackWrite(Flush, "/slow")
+	endFlush, _ := filesystem.trackWrite(Flush, "/slow")
 	defer endFlush()
-	filesystem.trackWrite(Write, "/done")()
+	endWrite, _ := filesystem.trackWrite(Write, "/done")
+	endWrite()
 	start := time.Now()
 	pending := filesystem.WaitForWrites(200 * time.Millisecond)
 	if want := []string{"flush /slow"}; !reflect.DeepEqual(pending, want) {
@@ -77,5 +80,21 @@ func TestWaitForWritesWaitsForAnUnflushedFile(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed < 100*time.Millisecond || elapsed > 2*time.Second {
 		t.Fatalf("returned after %s, want right after the flush at 100 ms", elapsed)
+	}
+}
+
+// Once the wait has returned, at zero or at the bound, no handler starts: a
+// write cannot be acknowledged after the exit decided its code.
+func TestWaitForWritesRefusesHandlersAfterItReturns(t *testing.T) {
+	for _, pendingAtBound := range []bool{false, true} {
+		filesystem := &FileSystem{}
+		if pendingAtBound {
+			end, _ := filesystem.trackWrite(Flush, "/slow")
+			defer end()
+		}
+		filesystem.WaitForWrites(50 * time.Millisecond)
+		if _, err := filesystem.trackWrite(Write, "/late"); !errors.Is(err, syscall.EROFS) {
+			t.Fatalf("pendingAtBound=%v: trackWrite after the wait returned %v, want EROFS", pendingAtBound, err)
+		}
 	}
 }
