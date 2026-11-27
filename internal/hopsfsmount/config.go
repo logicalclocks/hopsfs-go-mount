@@ -54,6 +54,7 @@ var StagingCacheDiskUsageCheckInterval time.Duration = 1 * time.Second
 var StagingCacheStatsReportingInterval time.Duration = 0
 var NameNodeDialTimeout time.Duration = 30 * time.Second
 var NameNodeTCPUserTimeout time.Duration = 30 * time.Second
+var ExitTimeout time.Duration = 0
 
 func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	flag.BoolVar(&LazyMount, "lazy", false, "Allows to mount HopsFS filesystem before HopsFS is available")
@@ -75,6 +76,7 @@ func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 	flag.IntVar(&Connectors, "numConnections", 1, "Number of connections with the namenode")
 	flag.DurationVar(&NameNodeDialTimeout, "namenodeDialTimeout", 30*time.Second, "Time limit for establishing a connection to the namenode, including the TLS handshake. Negative disables the limit")
 	flag.DurationVar(&NameNodeTCPUserTimeout, "namenodeTcpUserTimeout", 30*time.Second, "TCP_USER_TIMEOUT for namenode connections: how long sent data may stay unacknowledged before the connection is declared dead. Negative disables it")
+	flag.DurationVar(&ExitTimeout, "exitTimeout", 0, "On SIGINT or SIGTERM, wait up to this long for running write operations, then exit: 0 when none was left, 1 when one was. Set it where something other than this process owns the mount, such as a sidecar given a mounted FUSE descriptor. 0 keeps serving until the kernel ends the connection")
 	flag.StringVar(&ForceOverrideUsername, "hopsFSUserName", "", "HopsFS username")
 	flag.StringVar(&ForceOverrideGroupname, "hopsFSGroupName", "", "HopsFS groupname")
 	flag.BoolVar(&UseGroupFromHopsFsDatasetPath, "getGroupFromHopsFSDatasetPath", false, "Get the group from hopsfs dataset path. This will work if a hopsworks project is mounted")
@@ -119,6 +121,10 @@ func ParseArgsAndInitLogger(retryPolicy *RetryPolicy) {
 		log.Fatalf("Invalid config. cacheAttrsTimeSecs can not be negative ")
 	} else {
 		CacheAttrsTimeDuration = time.Second * time.Duration(CacheAttrsTimeSecs)
+	}
+
+	if ExitTimeout < 0 {
+		log.Fatalf("Invalid config. exitTimeout can not be negative")
 	}
 
 	_, err := ValidateUmask(UserUmask)
