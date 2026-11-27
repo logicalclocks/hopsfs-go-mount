@@ -114,11 +114,16 @@ func main() {
 		logger.Info("Closed...", nil)
 	}()
 
+	exiting := make(chan struct{})
 	go func() {
 		for x := range sigs {
 			//Handling INT/TERM signals - trying to gracefully unmount and exit
 			//TODO: before doing that we need to finish deferred flushes
 			logger.Info(fmt.Sprintf("Received signal: %s", x.String()), nil)
+			if hopsfsmount.ExitTimeout > 0 {
+				close(exiting)
+				exitOnSignal(fileSystem, mountPoint, x)
+			}
 			if hopsfsmount.StagingCache != nil {
 				hopsfsmount.StagingCache.Shutdown()
 			}
@@ -129,9 +134,37 @@ func main() {
 		}
 	}()
 	err = fs.Serve(c, fileSystem)
+	select {
+	case <-exiting:
+		// A lazy unmount can end Serve while exitOnSignal runs; it sets the exit code.
+		select {}
+	default:
+	}
 	if err != nil {
 		logger.Fatal(fmt.Sprintf("Failed to serve FS. Error: %v", err), nil)
 	}
+}
+
+// exitOnSignal ends the process once no write handler runs and every file's
+// data is in HopsFS, or after ExitTimeout. Unmount alone does not end Serve
+// where another process owns the kernel mount: Serve stays in ReadRequest
+// until the connection ends. The outcome is logged before the unmount, which
+// can be slow or end the process itself.
+func exitOnSignal(fileSystem *hopsfsmount.FileSystem, mountPoint string, sig os.Signal) {
+	pending := fileSystem.WaitForWrites(hopsfsmount.ExitTimeout)
+	code := 0
+	if len(pending) > 0 {
+		code = 1
+		logger.Error(fmt.Sprintf("Exiting on %s with %d writes not in HopsFS after %s: %s",
+			sig, len(pending), hopsfsmount.ExitTimeout, strings.Join(pending, ", ")), nil)
+	} else {
+		logger.Warn(fmt.Sprintf("Exiting on %s with every write in HopsFS", sig), nil)
+	}
+	if hopsfsmount.StagingCache != nil {
+		hopsfsmount.StagingCache.Shutdown()
+	}
+	fileSystem.Unmount(mountPoint)
+	os.Exit(code)
 }
 
 func createStagingDir() {

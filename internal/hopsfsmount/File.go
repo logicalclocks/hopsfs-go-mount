@@ -186,11 +186,13 @@ func (file *FileINode) closeStaging() {
 // Must be called with dataMutex held
 func (file *FileINode) markDirty() {
 	file.isDirty = true
+	file.FileSystem.setOwed(file, true)
 }
 
 // Flushes file to DFS if dirty
 // Lock order: dataMutex (3) held by caller → fileHandleMutex (1) via flushAttempt
 func (file *FileINode) flushToDFS(operation string) error {
+	defer func() { file.FileSystem.setOwed(file, file.isDirty || file.pendingDFSWriter != nil) }()
 	// Check dirty flag (already protected by dataMutex held by caller)
 	if !file.isDirty {
 		// If there's a pending writer from file creation (e.g. touch or empty file),
@@ -345,6 +347,11 @@ func (file *FileINode) flushAttempt(operation string) error {
 // Responds to the FUSE Fsync request
 // Lock order: dataMutex (3) → fileHandleMutex (1) via flushToDFS
 func (file *FileINode) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
+	done, refused := file.FileSystem.trackWrite(Fsync, file.AbsolutePath())
+	if refused != nil {
+		return refused
+	}
+	defer done()
 	// If delaySyncUntilClose is enabled, skip fsync until file close
 	if file.FileSystem.DelaySyncUntilClose {
 		logger.Debug("Fsync deferred until close", file.logInfo(logger.Fields{Operation: Fsync}))
@@ -366,6 +373,11 @@ func (file *FileINode) InvalidateMetadataCache() {
 // Responds on FUSE Chmod request
 // Lock order: fileHandleMutex (1) alone for size change, fileMutex (2) alone for other attrs
 func (file *FileINode) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
+	done, refused := file.FileSystem.trackWrite(Setattr, file.AbsolutePath())
+	if refused != nil {
+		return refused
+	}
+	defer done()
 	logger.Debug("Setattr request received: ", logger.Fields{Operation: Setattr})
 
 	if req.Valid.Size() {
@@ -448,6 +460,7 @@ func (file *FileINode) createStagingFile(operation string, existsInDFS bool) (*o
 		// Save the writer for reuse during first flush, avoiding the redundant
 		// Close+Remove+Recreate cycle. The writer will be used in flushAttempt().
 		file.pendingDFSWriter = w
+		file.FileSystem.setOwed(file, true)
 		logger.Info("Created file in DFS with group (writer kept open)", file.logInfo(logger.Fields{Operation: operation, Group: file.Attrs.DFSGroupName}))
 	} else {
 		// Request to write to existing file - stat to verify it exists and get metadata.
