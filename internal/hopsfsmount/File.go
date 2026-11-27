@@ -186,11 +186,13 @@ func (file *FileINode) closeStaging() {
 // Must be called with dataMutex held
 func (file *FileINode) markDirty() {
 	file.isDirty = true
+	file.FileSystem.setOwed(file, true)
 }
 
 // Flushes file to DFS if dirty
 // Lock order: dataMutex (3) held by caller → fileHandleMutex (1) via flushAttempt
 func (file *FileINode) flushToDFS(operation string) error {
+	defer func() { file.FileSystem.setOwed(file, file.isDirty || file.pendingDFSWriter != nil) }()
 	// Check dirty flag (already protected by dataMutex held by caller)
 	if !file.isDirty {
 		// If there's a pending writer from file creation (e.g. touch or empty file),
@@ -450,6 +452,7 @@ func (file *FileINode) createStagingFile(operation string, existsInDFS bool) (*o
 		// Save the writer for reuse during first flush, avoiding the redundant
 		// Close+Remove+Recreate cycle. The writer will be used in flushAttempt().
 		file.pendingDFSWriter = w
+		file.FileSystem.setOwed(file, true)
 		logger.Info("Created file in DFS with group (writer kept open)", file.logInfo(logger.Fields{Operation: operation, Group: file.Attrs.DFSGroupName}))
 	} else {
 		// Request to write to existing file - stat to verify it exists and get metadata.

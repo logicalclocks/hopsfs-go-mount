@@ -248,7 +248,7 @@ func TestExitOnSignalAfterClose(t *testing.T) {
 	if elapsed > time.Second {
 		t.Fatalf("exit %s after SIGTERM, want under 1 s\n%s", elapsed, p.output.String())
 	}
-	if !strings.Contains(p.output.String(), "Exiting on terminated with no write operation running") {
+	if !strings.Contains(p.output.String(), "Exiting on terminated with every write in HopsFS") {
 		t.Fatalf("no exit line in the output:\n%s", p.output.String())
 	}
 	assertInHopsFS(t, accessor, hopsPath, size, sum)
@@ -304,4 +304,89 @@ func TestExitOnSignalDuringFlush(t *testing.T) {
 		t.Fatalf("exit code %d, want 0\n%s", code, p.output.String())
 	}
 	assertInHopsFS(t, accessor, hopsPath, size, sum)
+}
+
+// SIGTERM while a writer holds a dirty, unflushed file and no handler runs
+// (the kernel flushing a killed process's fds after the sidecar's TERM): the
+// process waits for the FLUSH, close() succeeds, the file is whole, exit 0.
+func TestExitOnSignalFlushAfterTerm(t *testing.T) {
+	bin := buildMountBinary(t)
+	accessor := newTestAccessor(t)
+	base := newTestBase(t, accessor)
+	p := startMountProcess(t, bin, base)
+
+	name := uniqueTestName("exit_flush_after_term")
+	hopsPath := base + "/" + name
+	t.Cleanup(func() {
+		if err := accessor.Remove(hopsPath); err != nil {
+			t.Errorf("remove of %s in HopsFS failed: %v", hopsPath, err)
+		}
+	})
+
+	const size = 8 << 20
+	f, err := os.Create(filepath.Join(p.dir, name))
+	if err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	sum := writeRandom(t, f, size)
+
+	termAt := time.Now()
+	if err := p.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("SIGTERM failed: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+	select {
+	case <-p.done:
+		t.Fatalf("exited with a dirty file still open\n%s", p.output.String())
+	default:
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close after SIGTERM failed: %v\n%s", err, p.output.String())
+	}
+	code, _ := p.waitExit(t, termAt, exitTestTimeout+time.Second)
+	if code != 0 {
+		t.Fatalf("exit code %d, want 0\n%s", code, p.output.String())
+	}
+	assertInHopsFS(t, accessor, hopsPath, size, sum)
+}
+
+// A dirty file still open when the bound runs out: exit 1, and the ERROR line
+// names the file.
+func TestExitOnSignalUnflushedAtBound(t *testing.T) {
+	bin := buildMountBinary(t)
+	accessor := newTestAccessor(t)
+	base := newTestBase(t, accessor)
+	p := startMountProcess(t, bin, base)
+
+	name := uniqueTestName("exit_unflushed")
+	hopsPath := base + "/" + name
+	t.Cleanup(func() {
+		// Create opened the file in HopsFS; whether an entry is left after the
+		// exit is not part of this test, so only a missing file is accepted.
+		if err := accessor.Remove(hopsPath); err != nil && !errors.Is(err, syscall.ENOENT) && !os.IsNotExist(err) {
+			t.Errorf("remove of %s in HopsFS failed: %v", hopsPath, err)
+		}
+	})
+
+	f, err := os.Create(filepath.Join(p.dir, name))
+	if err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	writeRandom(t, f, 1<<20)
+
+	termAt := time.Now()
+	if err := p.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("SIGTERM failed: %v", err)
+	}
+	code, elapsed := p.waitExit(t, termAt, exitTestTimeout+2*time.Second)
+	f.Close()
+	if code != 1 {
+		t.Fatalf("exit code %d, want 1\n%s", code, p.output.String())
+	}
+	if elapsed < exitTestTimeout {
+		t.Fatalf("exit %s after SIGTERM, before the %s bound\n%s", elapsed, exitTestTimeout, p.output.String())
+	}
+	if want := "unflushed " + hopsPath; !strings.Contains(p.output.String(), want) {
+		t.Fatalf("the exit line does not name %q:\n%s", want, p.output.String())
+	}
 }
