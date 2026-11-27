@@ -390,3 +390,114 @@ func TestExitOnSignalUnflushedAtBound(t *testing.T) {
 		t.Fatalf("the exit line does not name %q:\n%s", want, p.output.String())
 	}
 }
+
+// The same as TestExitOnSignalFlushAfterTerm for a file that exists before it
+// is opened (O_WRONLY|O_APPEND): it is owed through Write, with no create
+// writer.
+func TestExitOnSignalAppendAfterTerm(t *testing.T) {
+	bin := buildMountBinary(t)
+	accessor := newTestAccessor(t)
+	base := newTestBase(t, accessor)
+	p := startMountProcess(t, bin, base)
+
+	name := uniqueTestName("exit_append_after_term")
+	hopsPath := base + "/" + name
+	localPath := filepath.Join(p.dir, name)
+	t.Cleanup(func() {
+		if err := accessor.Remove(hopsPath); err != nil {
+			t.Errorf("remove of %s in HopsFS failed: %v", hopsPath, err)
+		}
+	})
+
+	hash := sha256.New()
+	f, err := os.Create(localPath)
+	if err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	if _, err := io.CopyN(io.MultiWriter(f, hash), rand.Reader, 1<<20); err != nil {
+		t.Fatalf("first write failed: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("first close failed: %v", err)
+	}
+
+	f, err = os.OpenFile(localPath, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatalf("open for append failed: %v", err)
+	}
+	if _, err := io.CopyN(io.MultiWriter(f, hash), rand.Reader, 4<<20); err != nil {
+		t.Fatalf("append failed: %v", err)
+	}
+	sum := hex.EncodeToString(hash.Sum(nil))
+
+	termAt := time.Now()
+	if err := p.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("SIGTERM failed: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+	select {
+	case <-p.done:
+		t.Fatalf("exited with an appended file still open\n%s", p.output.String())
+	default:
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close after SIGTERM failed: %v\n%s", err, p.output.String())
+	}
+	code, _ := p.waitExit(t, termAt, exitTestTimeout+time.Second)
+	if code != 0 {
+		t.Fatalf("exit code %d, want 0\n%s", code, p.output.String())
+	}
+	assertInHopsFS(t, accessor, hopsPath, 5<<20, sum)
+}
+
+// Writes on a clean open fd keep going after SIGTERM until one fails. A write
+// that succeeded after the TERM makes the file owed, so the exit is then 1
+// naming it; an exit 0 means no write after the TERM was acknowledged. Never
+// both: no acknowledged write is lost behind an exit 0.
+func TestExitOnSignalNoWriteLostAfterTerm(t *testing.T) {
+	bin := buildMountBinary(t)
+	accessor := newTestAccessor(t)
+	base := newTestBase(t, accessor)
+	p := startMountProcess(t, bin, base)
+
+	name := uniqueTestName("exit_no_write_lost")
+	hopsPath := base + "/" + name
+	localPath := filepath.Join(p.dir, name)
+	t.Cleanup(func() {
+		if err := accessor.Remove(hopsPath); err != nil && !errors.Is(err, syscall.ENOENT) && !os.IsNotExist(err) {
+			t.Errorf("remove of %s in HopsFS failed: %v", hopsPath, err)
+		}
+	})
+	if err := os.WriteFile(localPath, []byte("x"), 0600); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	f, err := os.OpenFile(localPath, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatalf("open failed: %v", err)
+	}
+	defer f.Close()
+
+	termAt := time.Now()
+	if err := p.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("SIGTERM failed: %v", err)
+	}
+	acked := 0
+	buf := make([]byte, 4096)
+	for time.Since(termAt) < exitTestTimeout+2*time.Second {
+		if _, err := f.Write(buf); err != nil {
+			break
+		}
+		acked++
+	}
+	code, _ := p.waitExit(t, termAt, exitTestTimeout+2*time.Second)
+	t.Logf("%d writes acknowledged after SIGTERM, exit %d", acked, code)
+	switch {
+	case acked == 0 && code == 0:
+	case acked > 0 && code == 1:
+		if want := "unflushed " + hopsPath; !strings.Contains(p.output.String(), want) {
+			t.Fatalf("exit 1 without naming %q:\n%s", want, p.output.String())
+		}
+	default:
+		t.Fatalf("%d writes acknowledged after SIGTERM and exit %d: an acknowledged write is lost\n%s", acked, code, p.output.String())
+	}
+}
