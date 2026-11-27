@@ -213,13 +213,15 @@ func (dir *VirtualDirINode) lookupVirtualDirectoryChild(operation, name string) 
 }
 
 // ensureSyntheticDirectoryChild returns the synthetic node for the given relPath, allocating it
-// on first use and reusing the cached node when its attrs are still fresh. The cache is
-// invalidated if the cached node represents a different relPath or backend path than requested.
+// on first use and reusing the cached node after that, also once its attrs have expired: Attr
+// refreshes them in place. A new node would reach the kernel under a new node ID, and the kernel
+// would drop every entry it caches below this directory. The cache is invalidated if the cached
+// node represents a different relPath or backend path than requested.
 func (dir *VirtualDirINode) ensureSyntheticDirectoryChild(operation string, relPath, name, backendPath string) (*VirtualDirINode, error) {
 	if node := dir.getChildInode(operation, name); node != nil {
 		if cachedDir, ok := node.(*VirtualDirINode); !ok || cachedDir.config.Name != dir.config.Name || cachedDir.relPath != relPath || cachedDir.AbsolutePath() != backendPath {
 			dir.removeChildInode(operation, name)
-		} else if !dir.FileSystem.Clock.Now().After(cachedDir.Attrs.Expires) {
+		} else {
 			return cachedDir, nil
 		}
 	}
@@ -265,25 +267,26 @@ func (dir *VirtualDirINode) statInodeInHopsFS(operation, name string, attrs *Att
 	return inode, nil
 }
 
-// refreshSyntheticAttrs re-stats the backend path this synthetic node represents and updates
-// the cached Attrs in place. The synthetic Name and Inode are preserved so the FUSE kernel
-// continues to see the same identity; only the backend-derived fields (mode, owner, timestamps,
-// size, expiry) get refreshed.
+// refreshSyntheticAttrs re-stats the backend directory this synthetic node took its attrs from
+// and updates the cached Attrs in place. The synthetic Name and Inode stay the same, so the
+// kernel keeps seeing the same identity.
 func (dir *VirtualDirINode) refreshSyntheticAttrs() error {
-	backendAttrs, err := dir.FileSystem.getDFSConnector().Stat(dir.AbsolutePath())
+	attrs, err := buildVirtualDirectoryAttrs(dir.FileSystem, GetattrDir, dir.relPath, dir.Attrs.Name, dir.attrsPath(), dir.config)
 	if err != nil {
 		return err
 	}
-	if !backendAttrs.Mode.IsDir() {
-		return fmt.Errorf("virtual directory path %q is not a directory", dir.AbsolutePath())
-	}
-	backendAttrs.Name = dir.Attrs.Name
-	backendAttrs.Inode = dir.Attrs.Inode
-	if backendAttrs.Expires.IsZero() {
-		backendAttrs.Expires = dir.FileSystem.Clock.Now().Add(CacheAttrsTimeDuration)
-	}
-	dir.Attrs = backendAttrs
+	dir.Attrs = attrs
 	return nil
+}
+
+// attrsPath is the backend directory this node's attrs come from. A virtual root has those of
+// filesystem.SrcDir, as ensureVirtualRootChild gives it, not those of the backend root its
+// children resolve against.
+func (dir *VirtualDirINode) attrsPath() string {
+	if dir.relPath == "" {
+		return dir.FileSystem.SrcDir
+	}
+	return dir.AbsolutePath()
 }
 
 // rejectMutation logs the rejection and returns EPERM. Shared by all synthetic-side write
@@ -405,9 +408,10 @@ func (filesystem *FileSystem) lookupVirtualRoot(dir *DirINode, opName, name stri
 		return nil, true, err
 	}
 
-	// ENOENT: no real entry. Return the cached synthetic if it is still fresh, otherwise build one.
+	// ENOENT: no real entry. Return the cached synthetic, expired or not, otherwise build one:
+	// see ensureSyntheticDirectoryChild for why an expired one is kept.
 	if node := dir.getChildInode(opName, name); node != nil {
-		if cached, ok := node.(*VirtualDirINode); ok && cached.config.Name == virtualDirectory.Name && cached.relPath == "" && !now.After(cached.Attrs.Expires) {
+		if cached, ok := node.(*VirtualDirINode); ok && cached.config.Name == virtualDirectory.Name && cached.relPath == "" {
 			return cached, true, nil
 		}
 	}

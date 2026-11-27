@@ -333,7 +333,7 @@ func TestVirtualDirectoryMetadataIsCached(t *testing.T) {
 	assert.Nil(t, err)
 	second, err := root.(*DirINode).Lookup(nil, "shared-datasets")
 	assert.Nil(t, err)
-	assert.Equal(t, first, second)
+	assert.Same(t, first, second)
 
 	hdfsAccessor.EXPECT().Stat("/Projects/other-project").Return(Attrs{
 		Name:    "other-project",
@@ -352,7 +352,97 @@ func TestVirtualDirectoryMetadataIsCached(t *testing.T) {
 	assert.Equal(t, []string{"other-project"}, direntNames(direntsAgain))
 	sharedProjectAgain, err := first.(*VirtualDirINode).Lookup(nil, "other-project")
 	assert.Nil(t, err)
-	assert.Equal(t, sharedProject, sharedProjectAgain)
+	assert.Same(t, sharedProject, sharedProjectAgain)
+}
+
+func TestVirtualDirectoriesKeepTheirNodesWhenTheirAttrsExpire(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	mockClock := &MockClock{}
+	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
+	hdfsAccessor.EXPECT().TryReserve().Return(true).AnyTimes()
+
+	fs, _ := NewFileSystem(
+		[]HdfsAccessor{hdfsAccessor},
+		"/Projects/current-project",
+		[]string{"*"},
+		false,
+		DelaySyncUntilClose,
+		NewDefaultRetryPolicy(mockClock),
+		mockClock,
+		WithVirtualDirectory("shared-datasets", []string{"other-project/shared-a"}, "/Projects"),
+	)
+	root, _ := fs.Root()
+
+	hdfsAccessor.EXPECT().Stat("/Projects/current-project/shared-datasets").Return(Attrs{}, syscall.ENOENT).Times(2)
+	hdfsAccessor.EXPECT().Stat("/Projects/current-project").Return(Attrs{Name: "current-project", Mode: os.ModeDir | 0770, Uid: 111}, nil)
+	hdfsAccessor.EXPECT().Stat("/Projects/other-project").Return(Attrs{Name: "other-project", Mode: os.ModeDir | 0770, Uid: 333}, nil)
+	hdfsAccessor.EXPECT().Stat("/Projects/other-project/shared-a").Return(Attrs{Name: "shared-a", Mode: os.ModeDir}, nil).Times(2)
+	hdfsAccessor.EXPECT().Stat("/Projects/other-project/shared-a/data.csv").Return(Attrs{Name: "data.csv", Mode: 0660}, nil)
+	sharedRoot, err := root.(*DirINode).Lookup(nil, "shared-datasets")
+	assert.Nil(t, err)
+	sharedProject, err := sharedRoot.(*VirtualDirINode).Lookup(nil, "other-project")
+	assert.Nil(t, err)
+	sharedDataset, err := sharedProject.(*VirtualDirINode).Lookup(nil, "shared-a")
+	assert.Nil(t, err)
+	file, err := sharedDataset.(*DirINode).Lookup(nil, "data.csv")
+	assert.Nil(t, err)
+
+	mockClock.NotifyTimeElapsed(2 * CacheAttrsTimeDuration)
+
+	// A new node would reach the kernel under a new node ID, and the kernel would drop
+	// everything it caches below it. A file open below would then get a second node.
+	sharedRootAgain, err := root.(*DirINode).Lookup(nil, "shared-datasets")
+	assert.Nil(t, err)
+	assert.Same(t, sharedRoot, sharedRootAgain)
+	sharedProjectAgain, err := sharedRootAgain.(*VirtualDirINode).Lookup(nil, "other-project")
+	assert.Nil(t, err)
+	assert.Same(t, sharedProject, sharedProjectAgain)
+	sharedDatasetAgain, err := sharedProjectAgain.(*VirtualDirINode).Lookup(nil, "shared-a")
+	assert.Nil(t, err)
+	fileAgain, err := sharedDatasetAgain.(*DirINode).Lookup(nil, "data.csv")
+	assert.Nil(t, err)
+	assert.Same(t, file, fileAgain)
+
+	// The kernel asks each node of a lookup reply for its attrs, which refreshes expired ones.
+	hdfsAccessor.EXPECT().Stat("/Projects/current-project").Return(Attrs{Name: "current-project", Mode: os.ModeDir | 0770, Uid: 112}, nil)
+	hdfsAccessor.EXPECT().Stat("/Projects/other-project").Return(Attrs{Name: "other-project", Mode: os.ModeDir | 0770, Uid: 334}, nil)
+	var attr fuse.Attr
+	assert.Nil(t, sharedRootAgain.(*VirtualDirINode).Attr(nil, &attr))
+	assert.Equal(t, uint32(112), attr.Uid)
+	assert.Nil(t, sharedProjectAgain.(*VirtualDirINode).Attr(nil, &attr))
+	assert.Equal(t, uint32(334), attr.Uid)
+}
+
+func TestVirtualRootRefreshesItsAttrsFromTheMountedProject(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	mockClock := &MockClock{}
+	hdfsAccessor := NewMockHdfsAccessor(mockCtrl)
+	hdfsAccessor.EXPECT().TryReserve().Return(true).AnyTimes()
+
+	fs, _ := NewFileSystem(
+		[]HdfsAccessor{hdfsAccessor},
+		"/Projects/current-project",
+		[]string{"*"},
+		false,
+		DelaySyncUntilClose,
+		NewDefaultRetryPolicy(mockClock),
+		mockClock,
+		WithVirtualDirectory("shared-datasets", []string{"other-project/shared-a"}, "/Projects"),
+	)
+	root, _ := fs.Root()
+
+	hdfsAccessor.EXPECT().Stat("/Projects/current-project/shared-datasets").Return(Attrs{}, syscall.ENOENT)
+	hdfsAccessor.EXPECT().Stat("/Projects/current-project").Return(Attrs{Name: "current-project", Mode: os.ModeDir | 0770, Uid: 111, Gid: 222}, nil)
+	sharedRoot, err := root.(*DirINode).Lookup(nil, "shared-datasets")
+	assert.Nil(t, err)
+
+	mockClock.NotifyTimeElapsed(2 * CacheAttrsTimeDuration)
+	hdfsAccessor.EXPECT().Stat("/Projects/current-project").Return(Attrs{Name: "current-project", Mode: os.ModeDir | 0750, Uid: 111, Gid: 222}, nil)
+	var attr fuse.Attr
+	assert.Nil(t, sharedRoot.(*VirtualDirINode).Attr(nil, &attr))
+	assert.Equal(t, os.ModeDir|0750, attr.Mode)
+	assert.Equal(t, uint32(111), attr.Uid)
+	assert.Equal(t, uint32(222), attr.Gid)
 }
 
 func TestVirtualDirectoryMutationsOutsideConfiguredLeavesAreRejected(t *testing.T) {
